@@ -151,40 +151,8 @@ const RECS = {
 };
 
 // ── Seed data ─────────────────────────────────────────────────────────────
-// Seed dates are computed relative to today so snapshot windows always have data
-const _sd=(daysAgo)=>{const d=new Date();d.setDate(d.getDate()-daysAgo);return d.toISOString().substring(0,10);};
-const SEED=[
-  // vo2max — improving trend over 9 months
-  {id:"s1",metricId:"vo2max",value:33.5,date:_sd(270),note:"Baseline"},
-  {id:"s2",metricId:"vo2max",value:34.8,date:_sd(180)},
-  {id:"s3",metricId:"vo2max",value:36.1,date:_sd(90)},
-  {id:"s4",metricId:"vo2max",value:36.9,date:_sd(45)},
-  {id:"s5",metricId:"vo2max",value:37.9,date:_sd(7),note:"Zone 2"},
-  // rhr — improving trend
-  {id:"s6",metricId:"rhr",value:62,date:_sd(270),note:"Baseline"},
-  {id:"s7",metricId:"rhr",value:58,date:_sd(180)},
-  {id:"s8",metricId:"rhr",value:55,date:_sd(90)},
-  {id:"s9",metricId:"rhr",value:53,date:_sd(45)},
-  {id:"s10",metricId:"rhr",value:51,date:_sd(7)},
-  // bp — improving
-  {id:"s11",metricId:"bp",value:128,secondary:82,date:_sd(270),note:"Baseline"},
-  {id:"s12",metricId:"bp",value:122,secondary:79,date:_sd(180)},
-  {id:"s13",metricId:"bp",value:118,secondary:76,date:_sd(90)},
-  {id:"s14",metricId:"bp",value:115,secondary:75,date:_sd(45)},
-  {id:"s15",metricId:"bp",value:112,secondary:74,date:_sd(7),note:"Low sodium"},
-  // glucose — improving
-  {id:"s16",metricId:"glucose",value:98,date:_sd(270),note:"Baseline"},
-  {id:"s17",metricId:"glucose",value:93,date:_sd(180)},
-  {id:"s18",metricId:"glucose",value:88,date:_sd(90)},
-  {id:"s19",metricId:"glucose",value:85,date:_sd(45)},
-  {id:"s20",metricId:"glucose",value:82,date:_sd(7)},
-  // bodyfat — improving
-  {id:"s21",metricId:"bodyfat",value:26.5,date:_sd(270),note:"Baseline"},
-  {id:"s22",metricId:"bodyfat",value:24.2,date:_sd(180)},
-  {id:"s23",metricId:"bodyfat",value:22.1,date:_sd(90)},
-  {id:"s24",metricId:"bodyfat",value:21.0,date:_sd(45)},
-  {id:"s25",metricId:"bodyfat",value:20.4,date:_sd(7),note:"Resistance training"},
-];
+// No seed data — the app starts empty. Health entries are never pre-loaded or faked.
+// Entries are session-only and cleared when the browser tab is closed.
 
 // ── Apple Health streaming parser ─────────────────────────────────────────
 const AHT={
@@ -349,6 +317,155 @@ async function parseAH(file,onProgress){
   const counts={};entries.forEach(e=>{counts[e.metricId]=(counts[e.metricId]||0)+1;});
   if(!entries.length)throw new Error("No matching records found. Export must contain VO₂Max, RHR, BP, Glucose, or Body Fat.");
   return{entries,counts,dSex,dDOB};
+}
+
+// ── Google Fit Takeout parser ─────────────────────────────────────────────
+// Handles Google Takeout ZIPs:  Takeout/Fit/All Data/*.json
+// Each file has a "Data Points" array; each point has dataTypeName + fitValue[].
+const GFT={
+  "com.google.heart_rate.bpm":"rhr",
+  "com.google.blood_pressure":"bp",
+  "com.google.blood_glucose.level":"glucose",
+  "com.google.body.fat.percentage":"bodyfat",
+  "com.google.fitness.vo2max":"vo2max",
+  "com.google.vo2max":"vo2max",
+};
+// Detect whether a ZIP is a Google Fit Takeout (returns bool).
+// Peeks at central-directory filenames without decompressing.
+async function isGoogleFitZip(file){
+  try{
+    const ab=await file.slice(0,Math.min(file.size,2*1024*1024)).arrayBuffer();
+    const view=new DataView(ab);const bytes=new Uint8Array(ab);
+    const u32=o=>view.getUint32(o,true);const u16=o=>view.getUint16(o,true);
+    const tdec=new TextDecoder();
+    // scan local file headers to find a Fit JSON quickly
+    let p=0;
+    while(p<bytes.length-30){
+      if(u32(p)!==0x04034b50){p++;continue;}
+      const fnLen=u16(p+26),exLen=u16(p+28);
+      const fname=tdec.decode(bytes.subarray(p+30,p+30+fnLen)).toLowerCase();
+      if(fname.includes("fit")&&fname.endsWith(".json"))return true;
+      p+=30+fnLen+exLen+u32(p+18); // skip compressed data
+    }
+    return false;
+  }catch{return false;}
+}
+async function parseGF(file,onProgress){
+  const byMD={},bpByDate={};
+  const msFromNano=ns=>{
+    if(typeof BigInt!=="undefined"){try{return Number(BigInt(String(ns))/1000000n);}catch{}}
+    return Math.floor(Number(ns)/1000000);
+  };
+  const procJSON=(json,fname)=>{
+    let data;try{data=JSON.parse(json);}catch{return;}
+    const pts=data["Data Points"]||data.dataPoints||[];
+    pts.forEach(pt=>{
+      const dtn=pt.dataTypeName||"";
+      let mid=GFT[dtn];
+      if(!mid){
+        // filename fallback for unlabelled data
+        if(fname.includes("heart_rate"))mid="rhr";
+        else if(fname.includes("blood_pressure"))mid="bp";
+        else if(fname.includes("blood_glucose"))mid="glucose";
+        else if(fname.includes("body_fat")||fname.includes("body.fat"))mid="bodyfat";
+        else if(fname.includes("vo2"))mid="vo2max";
+      }
+      if(!mid)return;
+      const ns=pt.startTimeNanos||pt.endTimeNanos||"";if(!ns)return;
+      const date=new Date(msFromNano(ns)).toISOString().substring(0,10);
+      const fv=pt.fitValue||[];if(!fv.length)return;
+      if(mid==="bp"){
+        const sys=fv[0]?.fpVal;const dia=fv[1]?.fpVal;
+        if(sys&&sys>0){if(!bpByDate[date])bpByDate[date]=[];bpByDate[date].push({sys:Math.round(sys),dia:dia?Math.round(dia):undefined});}
+      }else{
+        let val=fv[0]?.fpVal??fv[0]?.intVal;if(val==null||isNaN(val))return;
+        if(mid==="glucose"&&val<25)val=Math.round(val*18.0182); // mmol/L → mg/dL
+        if(mid==="bodyfat"&&val<=1)val=parseFloat((val*100).toFixed(2)); // fraction → %
+        if(!byMD[mid])byMD[mid]={};
+        if(!byMD[mid][date])byMD[mid][date]=[];
+        byMD[mid][date].push(val);
+      }
+    });
+  };
+
+  // ── Native ZIP reader (same approach as parseAH) ──────────────────────
+  const ab=await file.arrayBuffer();
+  const dv=new DataView(ab);const bytes=new Uint8Array(ab);
+  const u32=o=>dv.getUint32(o,true);const u16=o=>dv.getUint16(o,true);
+  const u64=o=>Number(dv.getBigUint64(o,true));const tdec=new TextDecoder();
+  let eocd=-1;
+  for(let i=ab.byteLength-22;i>=Math.max(0,ab.byteLength-65558);i--){
+    if(u32(i)===0x06054b50){eocd=i;break;}
+  }
+  if(eocd===-1)throw new Error("Not a valid ZIP file.");
+  let cdOffset=u32(eocd+16),cdSize=u32(eocd+12);
+  if(eocd>=20&&u32(eocd-20)===0x07064b50){
+    const z64loc=eocd-20,z64off=u64(z64loc+8);
+    if(z64off<ab.byteLength&&u32(z64off)===0x06064b50){cdSize=u64(z64off+40);cdOffset=u64(z64off+48);}
+  }
+  // Collect all Fit JSON entries from central directory
+  const fitFiles=[];let pos=cdOffset;
+  while(pos<cdOffset+cdSize){
+    if(u32(pos)!==0x02014b50)break;
+    let compSize=u32(pos+20),uncompSize=u32(pos+24),localOff=u32(pos+42);
+    const compression=u16(pos+10),fnLen=u16(pos+28),extraLen=u16(pos+30),commentLen=u16(pos+32);
+    const fname=tdec.decode(bytes.subarray(pos+46,pos+46+fnLen));
+    if(compSize===0xFFFFFFFF||uncompSize===0xFFFFFFFF||localOff===0xFFFFFFFF){
+      let ep=pos+46+fnLen,epEnd=ep+extraLen;
+      while(ep+4<=epEnd){
+        const eid=u16(ep),esz=u16(ep+2);ep+=4;
+        if(eid===0x0001){
+          if(uncompSize===0xFFFFFFFF){uncompSize=u64(ep);ep+=8;}
+          if(compSize===0xFFFFFFFF){compSize=u64(ep);ep+=8;}
+          if(localOff===0xFFFFFFFF){localOff=u64(ep);}break;
+        }ep+=esz;
+      }
+    }
+    const lname=fname.toLowerCase();
+    const inFitFolder=lname.includes("all data")||(lname.includes("fit")&&lname.includes("/"));
+    if(inFitFolder&&lname.endsWith(".json")&&compSize>0)fitFiles.push({fname,compression,compSize,localOff});
+    pos+=46+fnLen+extraLen+commentLen;
+  }
+  if(!fitFiles.length)throw new Error("No Google Fit data files found.\n\nPlease export from: Google Takeout → Fit → Include All Data → Download ZIP.");
+
+  // Decompress and process each JSON file
+  for(let i=0;i<fitFiles.length;i++){
+    const{fname,compression,compSize,localOff}=fitFiles[i];
+    if(onProgress)onProgress(Math.min(95,Math.round((i/fitFiles.length)*95)));
+    if(u32(localOff)!==0x04034b50)continue;
+    const lfnLen=u16(localOff+26),lextraLen=u16(localOff+28);
+    const dataStart=localOff+30+lfnLen+lextraLen;
+    const compSlice=bytes.subarray(dataStart,dataStart+compSize);
+    let jsonText="";
+    if(compression===0){jsonText=tdec.decode(compSlice);}
+    else if(compression===8){
+      const ds=new DecompressionStream("deflate-raw");
+      const writer=ds.writable.getWriter();const reader=ds.readable.getReader();
+      const chunks=[];
+      await Promise.all([
+        (async()=>{await writer.write(compSlice);await writer.close();})(),
+        (async()=>{while(true){const{value,done}=await reader.read();if(done)break;chunks.push(value);}})(),
+      ]);
+      const total=chunks.reduce((a,b)=>a+b.length,0);
+      const combined=new Uint8Array(total);let off=0;
+      chunks.forEach(c=>{combined.set(c,off);off+=c.length;});
+      jsonText=tdec.decode(combined);
+    }else continue;
+    procJSON(jsonText,fname.toLowerCase());
+  }
+
+  // Fold BP into byMD
+  Object.entries(bpByDate).forEach(([date,vals])=>{if(!byMD.bp)byMD.bp={};byMD.bp[date]=vals;});
+  const entries=[];
+  Object.entries(byMD).forEach(([mid,byDate])=>{
+    Object.entries(byDate).forEach(([date,vals])=>{
+      if(mid==="bp"){vals.forEach(v=>{if(v.sys)entries.push({id:`gf_bp_${date}_${v.sys}`,metricId:"bp",value:v.sys,secondary:v.dia,date,note:"Google Fit"});});}
+      else{const avg=vals.reduce((a,b)=>a+b,0)/vals.length;entries.push({id:`gf_${mid}_${date}`,metricId:mid,value:parseFloat(avg.toFixed(MB[mid]?.dp??1)),date,note:"Google Fit"});}
+    });
+  });
+  const counts={};entries.forEach(e=>{counts[e.metricId]=(counts[e.metricId]||0)+1;});
+  if(!entries.length)throw new Error("No matching health records found.\n\nMake sure your Google Fit export includes Heart Rate, Blood Pressure, Glucose, Body Fat, or VO₂ Max.");
+  return{entries,counts,dSex:null,dDOB:null};
 }
 
 // ── Canvas snapshot ───────────────────────────────────────────────────────
@@ -807,36 +924,70 @@ function SnapshotModal({entries,sex,eth,bioAge,chronoAge,onClose}){
 
 // ── Import Panel ──────────────────────────────────────────────────────────
 function ImportPanel({onImport,onClose}){
-  const [step,setStep]=useState("instructions");
+  const [step,setStep]=useState("instructions"); // instructions | loading | preview | done
+  const [platform,setPlatform]=useState("apple"); // apple | google
   const [drag,setDrag]=useState(false);
   const [prog,setProg]=useState(0);
   const [preview,setPreview]=useState(null);
   const [err,setErr]=useState(null);
   const ref=useRef();
-  const process=async f=>{setErr(null);setStep("loading");setProg(0);try{const r=await parseAH(f,p=>setProg(p));setPreview(r);setStep("preview");}catch(e){setErr(e.message);setStep("instructions");}};
+
+  const process=async f=>{
+    setErr(null);setStep("loading");setProg(0);
+    try{
+      // Auto-detect format from ZIP contents — override the tab selection if needed
+      let isGF=false;
+      if(f.name.toLowerCase().endsWith(".zip"))isGF=await isGoogleFitZip(f);
+      if(isGF)setPlatform("google");
+      const r=isGF?await parseGF(f,p=>setProg(p)):await parseAH(f,p=>setProg(p));
+      setPreview({...r,source:isGF?"Google Fit":"Apple Health"});
+      setStep("preview");
+    }catch(e){setErr(e.message);setStep("instructions");}
+  };
+
   const OL={position:"fixed",inset:0,background:"rgba(0,0,0,0.88)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:20};
-  const BX={background:T.card,border:"1px solid #1a2a1a",borderRadius:16,width:"100%",maxWidth:560,maxHeight:"90vh",overflowY:"auto",padding:"30px 34px",position:"relative",animation:"fadeUp 0.22s ease"};
+  const BX={background:T.card,border:"1px solid #1a2a1a",borderRadius:16,width:"100%",maxWidth:580,maxHeight:"90vh",overflowY:"auto",padding:"30px 34px",position:"relative",animation:"fadeUp 0.22s ease"};
   const BB={background:T.gr,color:"#030a06",fontFamily:T.fn,fontWeight:700,fontSize:12,letterSpacing:"0.09em",border:"none",borderRadius:8,padding:"11px 26px",cursor:"pointer",boxShadow:"0 0 18px rgba(0,255,163,0.25)",width:"100%",marginTop:18};
   const SB={background:"transparent",color:T.dim,fontFamily:T.fn,fontSize:11,border:"1px solid #1e2a3a",borderRadius:8,padding:"9px 18px",cursor:"pointer",width:"100%",marginTop:8};
+  const ptab=a=>({flex:1,padding:"8px 0",border:"none",cursor:"pointer",fontFamily:T.fn,fontSize:11,letterSpacing:"0.07em",transition:"all 0.18s",
+    background:platform===a?"#0e2218":"transparent",color:platform===a?T.gr:"#334455",borderBottom:`2px solid ${platform===a?T.gr:"transparent"}`});
+
   if(step==="done")return <div style={OL}><div style={BX}><div style={{textAlign:"center",padding:"22px 0"}}>
     <div style={{fontSize:50,marginBottom:10}}>✅</div>
     <div style={{fontFamily:T.dp,fontSize:20,fontWeight:800,color:T.gr}}>Import Complete!</div>
-    <div style={{fontSize:12,color:T.dim,marginTop:8,lineHeight:1.8}}>{preview?.dSex&&<span>Detected: <b style={{color:T.br}}>{preview.dSex}</b> — ranges updated. </span>}Data merged.</div>
+    <div style={{fontSize:12,color:T.dim,marginTop:8,lineHeight:1.8}}>
+      {preview?.source&&<span style={{display:"block"}}>Source: <b style={{color:T.br}}>{preview.source}</b></span>}
+      {preview?.dSex&&<span>Detected sex: <b style={{color:T.br}}>{preview.dSex}</b> — ranges updated. </span>}
+      Data merged into session.
+    </div>
     <button style={{...BB,maxWidth:220,margin:"18px auto 0",display:"block"}} onClick={onClose}>Back to Dashboard</button>
   </div></div></div>;
+
   if(step==="loading")return <div style={OL}><div style={BX}><div style={{textAlign:"center",padding:"44px 0"}}>
     <div style={{fontSize:38,display:"inline-block",animation:"spin 1.2s linear infinite",marginBottom:14}}>⟳</div>
-    <div style={{fontFamily:T.dp,fontSize:17,fontWeight:700,color:T.gr}}>Streaming Health Data…</div>
-    <div style={{color:T.dim,fontSize:12,marginTop:8,marginBottom:18}}>Processing in 64 KB chunks — large exports take 15–30s.</div>
+    <div style={{fontFamily:T.dp,fontSize:17,fontWeight:700,color:T.gr}}>Parsing Health Data…</div>
+    <div style={{color:T.dim,fontSize:12,marginTop:8,marginBottom:18}}>
+      {platform==="google"?"Processing Google Fit JSON files…":"Streaming in 64 KB chunks — large exports take 15–30s."}
+    </div>
     <div style={{background:"#0d1117",borderRadius:5,height:5,overflow:"hidden",width:"100%",maxWidth:280,margin:"0 auto"}}>
       <div style={{height:"100%",background:T.gr,width:`${prog}%`,transition:"width 0.3s",boxShadow:"0 0 7px rgba(0,255,163,0.5)"}}/>
     </div>
     {prog>0&&<div style={{fontSize:11,color:T.dim,marginTop:7}}>{prog}%</div>}
   </div></div></div>;
+
   if(step==="preview"&&preview)return <div style={OL}><div style={BX}>
     <button onClick={onClose} style={{position:"absolute",top:16,right:18,background:"none",border:"none",color:T.dim,cursor:"pointer",fontSize:18}}>✕</button>
-    <div style={{fontFamily:T.dp,fontSize:18,fontWeight:800,color:T.br,marginBottom:6}}>Import Preview</div>
-    <div style={{fontSize:11,color:T.dim,marginBottom:18,lineHeight:1.8}}>Found <b style={{color:T.gr}}>{preview.entries.length} readings</b>.{preview.dSex&&<span> Sex: <b style={{color:T.br}}>{preview.dSex}</b>.</span>}{preview.dDOB&&<span> Age: <b style={{color:T.br}}>{new Date().getFullYear()-new Date(preview.dDOB).getFullYear()}</b>.</span>}</div>
+    <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6}}>
+      <div style={{fontFamily:T.dp,fontSize:18,fontWeight:800,color:T.br}}>Import Preview</div>
+      <span style={{fontSize:9,padding:"2px 8px",borderRadius:4,border:"1px solid rgba(0,255,163,0.25)",color:T.gr,background:"rgba(0,255,163,0.07)",letterSpacing:"0.09em"}}>
+        {preview.source==="Google Fit"?"📊 GOOGLE FIT":"⌘ APPLE HEALTH"}
+      </span>
+    </div>
+    <div style={{fontSize:11,color:T.dim,marginBottom:18,lineHeight:1.8}}>
+      Found <b style={{color:T.gr}}>{preview.entries.length} readings</b>.
+      {preview.dSex&&<span> Sex: <b style={{color:T.br}}>{preview.dSex}</b>.</span>}
+      {preview.dDOB&&<span> Age: <b style={{color:T.br}}>{new Date().getFullYear()-new Date(preview.dDOB).getFullYear()}</b>.</span>}
+    </div>
     {MK.map(id=>{const count=preview.counts[id]||0;const s=preview.entries.filter(e=>e.metricId===id).sort((a,b)=>b.date.localeCompare(a.date))[0];return <div key={id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #0e1824"}}>
       <div><div style={{fontSize:13,color:T.br}}>{MB[id].label}</div>{s&&<div style={{fontSize:10,color:T.dim}}>Latest: {s.value} · {s.date}</div>}</div>
       <div style={{display:"flex",alignItems:"center",gap:8}}>
@@ -847,23 +998,52 @@ function ImportPanel({onImport,onClose}){
     <button style={BB} onClick={()=>{onImport(preview);setStep("done");}}>Confirm Import</button>
     <button style={SB} onClick={()=>setStep("instructions")}>← Start Over</button>
   </div></div>;
+
+  // ── Instructions screen ──────────────────────────────────────────────────
+  const AH_STEPS=[
+    {t:"Health app → Profile photo → Export All Health Data",d:"Confirm export. Large exports (>500 MB) take 30–60s to prepare."},
+    {t:"Share export.zip to your computer",d:"Tap Share → Save to Files, or AirDrop to Mac."},
+    {t:"Drop the ZIP or XML below",d:"Parsed in 64 KB chunks entirely in your browser."},
+  ];
+  const GF_STEPS=[
+    {t:"Go to takeout.google.com",d:"Sign in with your Google account."},
+    {t:"Deselect all → select Fit only → choose 'All Fit data'",d:"Export format: ZIP. Any file size is supported."},
+    {t:"Download and drop the ZIP below",d:"We'll find all Health data JSON files automatically."},
+  ];
+  const steps=platform==="apple"?AH_STEPS:GF_STEPS;
+
   return <div style={OL}><div style={BX}>
     <button onClick={onClose} style={{position:"absolute",top:16,right:18,background:"none",border:"none",color:T.dim,cursor:"pointer",fontSize:18}}>✕</button>
-    <div style={{fontFamily:T.dp,fontSize:20,fontWeight:800,color:T.br,marginBottom:4}}>Import from Apple Health</div>
-    <div style={{fontSize:11,color:T.dim,marginBottom:22,lineHeight:1.8}}>Sex is auto-detected for correct ranges. All parsing is local — nothing leaves your device.</div>
-    {[{t:"Health app → Profile photo → Export All Health Data",d:"Confirm export. Large exports take 30–60s."},
-      {t:"Share export.zip to your Mac",d:"Tap Share → Save to Files, or AirDrop."},
-      {t:"Drop the file below",d:"Accepts export.zip or export.xml. Streamed in 64 KB chunks."}].map((s,i)=><div key={i} style={{display:"flex",gap:12,marginBottom:14}}>
+    <div style={{fontFamily:T.dp,fontSize:20,fontWeight:800,color:T.br,marginBottom:4}}>Import Health Data</div>
+    <div style={{fontSize:11,color:T.dim,marginBottom:16,lineHeight:1.8}}>All parsing is local — your data never leaves this device.</div>
+
+    {/* Platform tabs */}
+    <div style={{display:"flex",borderBottom:"1px solid #1e2a3a",marginBottom:22,gap:0}}>
+      <button style={ptab("apple")} onClick={()=>setPlatform("apple")}>📱 Apple Health</button>
+      <button style={ptab("google")} onClick={()=>setPlatform("google")}>📊 Google Fit</button>
+    </div>
+
+    {platform==="google"&&<div style={{marginBottom:14,padding:"9px 13px",background:"rgba(96,192,240,0.04)",border:"1px solid rgba(96,192,240,0.15)",borderRadius:7,fontSize:11,color:"#60c0f0",lineHeight:1.8}}>
+      📌 Google Fit VO₂ Max is device-dependent. If unavailable, log it manually after importing.
+    </div>}
+
+    {steps.map((s,i)=><div key={i} style={{display:"flex",gap:12,marginBottom:14}}>
       <div style={{width:24,height:24,borderRadius:"50%",background:"#0e2218",border:"1px solid #00ffa3",color:"#00ffa3",fontSize:10,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,fontWeight:700}}>{i+1}</div>
       <div style={{fontSize:12,color:"#8899aa",lineHeight:1.7}}><span style={{color:T.br,display:"block",fontWeight:500}}>{s.t}</span>{s.d}</div>
     </div>)}
+
     <div onDragOver={e=>{e.preventDefault();setDrag(true);}} onDragLeave={()=>setDrag(false)} onDrop={e=>{e.preventDefault();setDrag(false);const f=e.dataTransfer.files[0];if(f)process(f);}} onClick={()=>ref.current?.click()}
-      style={{border:`2px dashed ${drag?"#00ffa3":"#1e2a3a"}`,borderRadius:10,padding:"30px 20px",textAlign:"center",cursor:"pointer",background:drag?"rgba(0,255,163,0.04)":"transparent",transition:"all 0.2s",marginTop:6}}>
-      <div style={{fontSize:32,marginBottom:8}}>⬆</div>
-      <div style={{fontSize:13,color:T.dim}}>Drop <b style={{color:T.br}}>export.zip</b> or <b style={{color:T.br}}>export.xml</b> here<span style={{color:"#00ffa3",display:"block",fontSize:11,marginTop:3}}>or click to browse</span></div>
+      style={{border:`2px dashed ${drag?"#00ffa3":"#1e2a3a"}`,borderRadius:10,padding:"28px 20px",textAlign:"center",cursor:"pointer",background:drag?"rgba(0,255,163,0.04)":"transparent",transition:"all 0.2s",marginTop:4}}>
+      <div style={{fontSize:30,marginBottom:8}}>{platform==="google"?"📊":"⬆"}</div>
+      <div style={{fontSize:13,color:T.dim}}>
+        Drop your <b style={{color:T.br}}>{platform==="google"?"takeout-*.zip":"export.zip"}</b> here
+        <span style={{color:"#00ffa3",display:"block",fontSize:11,marginTop:3}}>or click to browse · format auto-detected</span>
+      </div>
       <input ref={ref} type="file" accept=".zip,.xml" style={{display:"none"}} onChange={e=>{if(e.target.files[0])process(e.target.files[0]);}}/>
     </div>
-    <div style={{marginTop:10,padding:"9px 13px",background:"rgba(0,100,255,0.03)",borderRadius:7,border:"1px solid rgba(40,60,120,0.2)",fontSize:10,color:T.dim,lineHeight:1.7}}>🔒 Privacy: Parsed entirely in-browser. No data leaves your device.</div>
+    <div style={{marginTop:10,padding:"9px 13px",background:"rgba(0,100,255,0.03)",borderRadius:7,border:"1px solid rgba(40,60,120,0.2)",fontSize:10,color:T.dim,lineHeight:1.7}}>
+      🔒 Privacy: Parsed 100% in-browser via WebStreams API. Nothing is uploaded.
+    </div>
     {err&&<div style={{marginTop:10,padding:"13px 15px",background:"rgba(255,107,107,0.06)",border:"1px solid rgba(255,107,107,0.2)",borderRadius:7,fontSize:12,color:"#ff6b6b",lineHeight:1.8,whiteSpace:"pre-wrap"}}>⚠ {err}</div>}
     <button style={SB} onClick={onClose}>Cancel</button>
   </div></div>;
@@ -893,9 +1073,229 @@ function EthModal({eth,setEth,onClose}){
   </div>;
 }
 
+// ── Landing Page (About tab) ──────────────────────────────────────────────
+const LP_CSS=`
+.lp{font-family:'DM Sans',sans-serif;color:#e0eeff;background:#060a10;min-height:100vh;overflow-x:hidden;}
+.lp-grid{position:fixed;inset:0;pointer-events:none;z-index:0;
+  background-image:linear-gradient(rgba(0,255,163,.022) 1px,transparent 1px),linear-gradient(90deg,rgba(0,255,163,.022) 1px,transparent 1px);
+  background-size:60px 60px;}
+.lp *{position:relative;z-index:1;}
+.lp-sec{padding:88px 24px;max-width:1080px;margin:0 auto;}
+.lp-lbl{font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:#00ffa3;margin-bottom:14px;display:flex;align-items:center;gap:10px;}
+.lp-lbl::after{content:'';flex:1;height:1px;background:#162030;max-width:56px;}
+.lp h2{font-family:'Syne',sans-serif;font-size:clamp(28px,4.5vw,50px);font-weight:800;line-height:1.08;letter-spacing:-.02em;margin-bottom:14px;}
+.lp-sub{font-size:15px;color:#7a9aaa;max-width:500px;line-height:1.72;margin-bottom:52px;}
+.lp-badge{display:inline-flex;align-items:center;gap:8px;background:rgba(0,255,163,.07);border:1px solid rgba(0,255,163,.22);border-radius:20px;padding:6px 18px;margin-bottom:34px;font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#00ffa3;}
+.lp-badge::before{content:'';width:6px;height:6px;border-radius:50%;background:#00ffa3;box-shadow:0 0 8px #00ffa3;animation:lpPulse 2s infinite;}
+@keyframes lpPulse{0%,100%{opacity:1}50%{opacity:.35}}
+.lp-steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:2px;}
+.lp-step{background:#0a0e16;padding:30px 26px;border:1px solid #0e1824;transition:border-color .2s,transform .2s;position:relative;overflow:hidden;}
+.lp-step:hover{border-color:rgba(0,255,163,.22);transform:translateY(-3px);}
+.lp-step::before{content:attr(data-n);position:absolute;top:-14px;right:12px;font-family:'Syne',sans-serif;font-size:86px;font-weight:900;color:rgba(0,255,163,.035);line-height:1;pointer-events:none;}
+.lp-step h3{font-family:'Syne',sans-serif;font-size:16px;font-weight:700;margin:12px 0 8px;}
+.lp-step p{font-size:13px;color:#6a8a9a;line-height:1.7;}
+.lp-feats{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:13px;}
+.lp-feat{background:#0a0e16;border:1px solid #0e1824;border-radius:12px;padding:24px 22px;transition:border-color .2s,box-shadow .2s;}
+.lp-feat:hover{border-color:rgba(0,255,163,.18);box-shadow:0 0 26px rgba(0,255,163,.05);}
+.lp-feat-ic{width:38px;height:38px;border-radius:9px;background:rgba(0,255,163,.07);border:1px solid rgba(0,255,163,.14);display:flex;align-items:center;justify-content:center;font-size:17px;margin-bottom:14px;}
+.lp-feat h3{font-family:'Syne',sans-serif;font-size:14px;font-weight:700;margin-bottom:6px;}
+.lp-feat p{font-size:12.5px;color:#6a8a9a;line-height:1.7;}
+.lp-ftag{display:inline-block;margin-top:11px;font-family:'DM Mono',monospace;font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:#00ffa3;background:rgba(0,255,163,.07);border:1px solid rgba(0,255,163,.14);border-radius:4px;padding:3px 8px;}
+.lp-priv{background:linear-gradient(135deg,rgba(0,255,163,.04) 0%,rgba(0,100,80,.025) 100%);border:1px solid rgba(0,255,163,.14);border-radius:14px;padding:40px 46px;display:flex;gap:40px;align-items:flex-start;flex-wrap:wrap;}
+.lp-priv h3{font-family:'Syne',sans-serif;font-size:22px;font-weight:800;margin-bottom:9px;}
+.lp-priv p{font-size:13px;color:#7a9aaa;line-height:1.78;}
+.lp-ptags{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px;}
+.lp-ptag{font-family:'DM Mono',monospace;font-size:9px;letter-spacing:.09em;text-transform:uppercase;color:#00ffa3;background:rgba(0,255,163,.07);border:1px solid rgba(0,255,163,.14);border-radius:20px;padding:4px 12px;}
+.lp-mtbl{display:flex;flex-direction:column;gap:2px;}
+.lp-mrow{display:grid;grid-template-columns:190px 1fr 180px;background:#0a0e16;border:1px solid #0e1824;transition:border-color .2s;}
+.lp-mrow:first-child{border-radius:11px 11px 0 0;}
+.lp-mrow:last-child{border-radius:0 0 11px 11px;}
+.lp-mrow:hover{border-color:#162030;}
+.lp-mrow>div{padding:18px 20px;border-right:1px solid #0e1824;}
+.lp-mrow>div:last-child{border-right:none;}
+.lp-mn{font-family:'Syne',sans-serif;font-size:14px;font-weight:700;margin-bottom:3px;}
+.lp-mu{font-family:'DM Mono',monospace;font-size:10px;color:#4a6070;}
+.lp-mw{font-size:12.5px;color:#7a9aaa;line-height:1.65;}
+.lp-ms{font-family:'DM Mono',monospace;font-size:10px;color:#4a6070;line-height:1.85;}
+.lp-strip{display:flex;justify-content:center;border-top:1px solid #0e1824;border-bottom:1px solid #0e1824;background:rgba(10,14,22,.65);overflow-x:auto;}
+.lp-pill{display:flex;flex-direction:column;align-items:center;padding:18px 34px;border-right:1px solid #0e1824;white-space:nowrap;flex-shrink:0;}
+.lp-pill:last-child{border-right:none;}
+.lp-pill .lv{font-family:'Syne',sans-serif;font-size:22px;font-weight:800;}
+.lp-pill .ll{font-family:'DM Mono',monospace;font-size:9px;letter-spacing:.13em;color:#4a6070;text-transform:uppercase;margin-top:4px;}
+.lp-pill .ls{font-size:9px;color:#2a3a4a;margin-top:1px;}
+.lp-rgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px;}
+.lp-paper{background:#0a0e16;border:1px solid #0e1824;border-radius:11px;padding:20px 18px;display:flex;flex-direction:column;gap:8px;transition:border-color .2s,transform .2s;}
+.lp-paper:hover{border-color:#162030;transform:translateY(-2px);}
+.lp-pmeta{display:flex;align-items:center;gap:7px;flex-wrap:wrap;}
+.lp-pt{font-family:'DM Mono',monospace;font-size:9px;letter-spacing:.09em;text-transform:uppercase;padding:3px 7px;border-radius:4px;border:1px solid;white-space:nowrap;}
+.lp-tvo2{color:#00ffa3;border-color:rgba(0,255,163,.3);background:rgba(0,255,163,.06);}
+.lp-thr{color:#f0c060;border-color:rgba(240,192,96,.3);background:rgba(240,192,96,.06);}
+.lp-tbp{color:#ff6b6b;border-color:rgba(255,107,107,.3);background:rgba(255,107,107,.06);}
+.lp-tgl{color:#7feba1;border-color:rgba(127,235,161,.3);background:rgba(127,235,161,.06);}
+.lp-tbf{color:#a78bfa;border-color:rgba(167,139,250,.3);background:rgba(167,139,250,.06);}
+.lp-tba{color:#60c0f0;border-color:rgba(96,192,240,.3);background:rgba(96,192,240,.06);}
+.lp-pyr{font-family:'DM Mono',monospace;font-size:10px;color:#4a6070;}
+.lp-paper h4{font-family:'Syne',sans-serif;font-size:13px;font-weight:700;line-height:1.3;color:#e0eeff;}
+.lp-pauth{font-family:'DM Mono',monospace;font-size:10px;color:#4a6070;}
+.lp-pp{font-size:12.5px;color:#7a9aaa;line-height:1.7;}
+.lp-pf{font-size:11.5px;color:#00ffa3;font-family:'DM Mono',monospace;background:rgba(0,255,163,.05);border-left:2px solid rgba(0,255,163,.38);padding:7px 10px;border-radius:0 5px 5px 0;line-height:1.6;}
+.lp-paper a{font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.08em;color:#4a6070;text-decoration:none;text-transform:uppercase;display:inline-flex;align-items:center;gap:4px;transition:color .2s;margin-top:auto;}
+.lp-paper a:hover{color:#00ffa3;}
+.lp-paper a::after{content:'↗';}
+.lp-cta{text-align:center;padding:100px 24px;background:radial-gradient(ellipse 80% 55% at 50% 0%,rgba(0,255,163,.06) 0%,transparent 70%);border-top:1px solid #0e1824;}
+.lp-cta h2{font-size:clamp(30px,5.5vw,64px);margin-bottom:16px;}
+.lp-cta p{font-size:15px;color:#7a9aaa;max-width:440px;margin:0 auto 38px;line-height:1.72;}
+.lp-disc{padding:28px 48px;border-top:1px solid #0e1824;font-size:11px;color:#2a3a4a;line-height:1.65;max-width:900px;margin:0 auto;}
+@media(max-width:820px){.lp-mrow{grid-template-columns:1fr;}.lp-mrow>div{border-right:none;border-bottom:1px solid #0e1824;}.lp-mrow>div:last-child{border-bottom:none;}.lp-priv{padding:26px 22px;}}
+`;
+function LandingPage({onEnterApp}){
+  const P=({cls,children,...r})=><div className={`lp-paper ${cls||""}`} {...r}>{children}</div>;
+  const cta={display:"inline-block",background:"#00ffa3",color:"#030a06",fontFamily:"'DM Mono',monospace",fontSize:12,fontWeight:500,letterSpacing:"0.11em",textTransform:"uppercase",padding:"15px 44px",borderRadius:8,border:"none",cursor:"pointer",transition:"all 0.22s",boxShadow:"0 0 50px rgba(0,255,163,0.3)"};
+  return <div className="lp">
+    <style>{LP_CSS}</style>
+    <div className="lp-grid"/>
+
+    {/* Hero */}
+    <div style={{minHeight:"88vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",textAlign:"center",padding:"80px 24px 52px",position:"relative"}}>
+      <div style={{position:"absolute",top:"18%",left:"50%",transform:"translateX(-50%)",width:600,height:600,borderRadius:"50%",background:"radial-gradient(circle,rgba(0,255,163,.065) 0%,transparent 68%)",pointerEvents:"none"}}/>
+      <div className="lp-badge">Free · Private · Science-backed · iOS &amp; Android</div>
+      <h2 style={{fontSize:"clamp(48px,8vw,94px)",fontFamily:"'Syne',sans-serif",fontWeight:900,lineHeight:.94,letterSpacing:"-.03em",marginBottom:26}}>
+        <span style={{color:"#00ffa3"}}>How old</span><br/>is your body<br/><span style={{color:"#4a6070",fontSize:"clamp(24px,3.8vw,42px)"}}>really?</span>
+      </h2>
+      <p style={{maxWidth:560,fontSize:17,color:"#7a9aaa",lineHeight:1.78,marginBottom:46}}>BioAge calculates your biological age from 5 clinically validated health metrics — then tells you which ones to fix and how, ranked by longevity impact.</p>
+      <div style={{display:"flex",gap:12,flexWrap:"wrap",justifyContent:"center"}}>
+        <button style={cta} onClick={onEnterApp}>Open Dashboard →</button>
+        <a href="#lp-how" style={{background:"transparent",color:"#e0eeff",fontFamily:"'DM Mono',monospace",fontSize:12,letterSpacing:"0.1em",textTransform:"uppercase",padding:"15px 32px",borderRadius:8,textDecoration:"none",border:"1px solid #162030",transition:"all 0.2s",display:"inline-block"}}>How It Works</a>
+      </div>
+      <p style={{marginTop:24,fontFamily:"'DM Mono',monospace",fontSize:10,color:"#4a6070",letterSpacing:"0.08em"}}>🔒 Your health data <span style={{color:"#00ffa3"}}>never leaves your device</span> — parsed entirely in-browser</p>
+    </div>
+
+    {/* Metrics strip */}
+    <div className="lp-strip">
+      {[["VO₂ Max","Cardio Fitness","ACSM","#00ffa3"],["Heart Rate","Resting HR","AHA","#f0c060"],["Blood Pressure","Systolic/Diastolic","AHA 2017","#ff6b6b"],["Glucose","Fasting Blood Sugar","ADA + Attia","#7feba1"],["Body Fat %","Composition","ACE by Sex","#a78bfa"]].map(([v,l,s,c])=>
+        <div key={v} className="lp-pill"><div className="lv" style={{color:c}}>{v}</div><div className="ll">{l}</div><div className="ls">{s}</div></div>)}
+    </div>
+
+    {/* How it works */}
+    <div id="lp-how" className="lp-sec" style={{padding:"88px 24px"}}>
+      <div className="lp-lbl">Process</div>
+      <h2>From raw data to<br/>a single number</h2>
+      <p className="lp-sub">BioAge turns your health metrics into one easy-to-understand score — your estimated biological age — with a full breakdown of what's driving it.</p>
+      <div className="lp-steps">
+        {[["📱","Import or Log","Drop your Apple Health ZIP or Google Fit Takeout ZIP into the browser — no upload, no account. Or manually log any reading. Sex and age are auto-detected from Apple Health exports.","1"],
+          ["⚡","Score Each Metric","Each metric is scored 15–100 against sex-specific clinical ranges from ACSM, AHA, ADA, and ACE. Ethnicity-adjusted thresholds applied where evidence supports them.","2"],
+          ["🧬","Estimate Bio Age","Scores are averaged and mapped to a biological age. A perfect score across all 5 metrics = 15 years younger than your chronological age.","3"],
+          ["🎯","Prioritised Action Plan","Each metric is ranked by bio-age years you could recover at optimal. The 30-day plan gives specific, research-backed protocols — not generic health tips.","4"],
+        ].map(([ic,title,desc,n])=>
+          <div key={n} className="lp-step" data-n={n}><div style={{fontSize:24}}>{ic}</div><h3>{title}</h3><p>{desc}</p></div>)}
+      </div>
+    </div>
+
+    {/* Features */}
+    <div className="lp-sec" style={{background:"rgba(8,12,20,.55)",padding:"88px 24px",maxWidth:"100%"}}>
+      <div style={{maxWidth:1080,margin:"0 auto"}}>
+        <div className="lp-lbl">Features</div>
+        <h2>Everything you need.<br/>Nothing you don't.</h2>
+        <p className="lp-sub">Built for people who want real insight from their health data — without subscriptions, accounts, or privacy trade-offs.</p>
+        <div className="lp-feats">
+          {[["🧬","Biological Age Estimate","A single number from 5 metrics, updated live. See how many years younger — or older — your body is behaving relative to your actual age.","Core metric"],
+            ["📊","Trend Tracking","Monthly bio age trajectory over 12 months. Per-metric sparklines show whether you're improving or declining — with optimal reference lines on every chart.","Visual analytics"],
+            ["📱","iOS Import — Apple Health","Drop your export.zip into the browser. The streaming parser handles files of any size — even 600 MB+ exports — in 64 KB chunks. Nothing is uploaded.","Zero upload"],
+            ["📊","Android Import — Google Fit","Drop your Google Takeout ZIP. BioAge automatically detects the format, walks the Fit/All Data JSON files, and merges your readings in seconds.","New"],
+            ["🌐","Ethnicity-Adjusted Ranges","Evidence-based threshold adjustments for South Asian, Black/African American, Hispanic/Latino, and East Asian populations from WHO, ADA, AHA, and Lancet.","Personalised"],
+            ["🎯","Impact-Ranked Action Plan","Each metric ranked by years of bio age you could recover at optimal. The 30-day plan gives one clear, evidence-backed protocol per metric.","Actionable"],
+          ].map(([ic,title,desc,tag])=>
+            <div key={title} className="lp-feat"><div className="lp-feat-ic">{ic}</div><h3>{title}</h3><p>{desc}</p><span className="lp-ftag">{tag}</span></div>)}
+        </div>
+      </div>
+    </div>
+
+    {/* Privacy */}
+    <div className="lp-sec" style={{padding:"88px 24px"}}>
+      <div className="lp-priv">
+        <div style={{fontSize:42,flexShrink:0,marginTop:4}}>🔒</div>
+        <div>
+          <h3>Your health data never leaves your device</h3>
+          <p>BioAge runs entirely in your browser. Apple Health ZIPs are decompressed via the browser's built-in DecompressionStream API; Google Fit ZIPs are parsed file-by-file in memory — no data is ever sent to a server. There are no accounts, no databases, and no analytics on your health information.</p>
+          <p style={{marginTop:10}}>Health entries are <b style={{color:"#e0eeff"}}>session-only</b>: they live in memory while the tab is open and are permanently gone the moment you close it.</p>
+          <div className="lp-ptags">
+            {["Zero upload","No accounts","No server storage","Session-only health data","No health analytics"].map(t=><span key={t} className="lp-ptag">{t}</span>)}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    {/* The 5 metrics */}
+    <div className="lp-sec" style={{background:"rgba(8,12,20,.55)",padding:"88px 24px",maxWidth:"100%"}}>
+      <div style={{maxWidth:1080,margin:"0 auto"}}>
+        <div className="lp-lbl">The Five Metrics</div>
+        <h2>Why these five?</h2>
+        <p className="lp-sub">The most predictive, routinely measurable biomarkers for longevity — each independently validated across decades of clinical research.</p>
+        <div className="lp-mtbl">
+          {[
+            ["VO₂ Max","mL/kg/min · ACSM","#00ffa3","The maximum oxygen your body can use during intense exercise. The single strongest predictor of long-term survival — stronger than blood pressure, cholesterol, or smoking. Each 1-unit improvement reduces all-cause mortality risk by ~13%.","Apple Watch (outdoor run) · 12-min Cooper Run · Lab VO₂ Max test"],
+            ["Resting Heart Rate","bpm · AHA","#f0c060","How many times your heart beats per minute at complete rest. A lower RHR means your heart pumps more blood per beat. RHR above 76 bpm is associated with significantly higher cardiovascular risk.","Apple Watch · Wear OS watch · 60-sec morning wrist count"],
+            ["Blood Pressure","mmHg systolic · AHA 2017","#ff6b6b","The pressure blood exerts against artery walls. High BP silently damages arteries and organs for years. Keeping systolic below 120 mmHg dramatically reduces risk of heart attack, stroke, and kidney disease.","Omron/Withings cuff — syncs to Apple Health or Google Fit"],
+            ["Fasting Glucose","mg/dL · ADA + Attia","#7feba1","Blood sugar after 8+ hrs without eating. Chronically elevated glucose accelerates cellular ageing even below the diabetic threshold. Optimal target 60–85 mg/dL — tighter than standard clinical guidelines.","ReliOn glucometer → Apple Health or Google Fit sync · CGM"],
+            ["Body Fat %","% · ACE by sex","#a78bfa","The proportion of body weight that is fat. Excess fat — especially visceral fat — drives insulin resistance and inflammation. Unlike BMI, body fat % correctly separates muscle from fat mass.","Smart scale (Withings/Renpho) → Apple Health or Google Fit sync"],
+          ].map(([n,u,c,w,s])=>
+            <div key={n} className="lp-mrow">
+              <div><div className="lp-mn" style={{color:c}}>{n}</div><div className="lp-mu">{u}</div></div>
+              <div className="lp-mw">{w}</div>
+              <div className="lp-ms">{s}</div>
+            </div>)}
+        </div>
+      </div>
+    </div>
+
+    {/* Research */}
+    <div className="lp-sec" style={{background:"rgba(7,11,18,.75)",padding:"88px 24px",maxWidth:"100%"}}>
+      <div style={{maxWidth:1080,margin:"0 auto"}}>
+        <div className="lp-lbl">Scientific Foundation</div>
+        <h2>Built on peer-reviewed<br/>research</h2>
+        <p style={{fontSize:14,color:"#7a9aaa",lineHeight:1.8,maxWidth:660,marginBottom:44}}>Every reference range, optimal target, and ethnicity adjustment is sourced directly from published clinical guidelines and medical research. Plain-English summaries — no medical background needed.</p>
+        <div className="lp-rgrid">
+          {[
+            {tag:"tvo2",lbl:"VO₂ Max",yr:"2018 · JAMA",title:"VO₂ Max as a Predictor of All-Cause Mortality",auth:"Mandsager et al.",plain:"A study of 122,000 patients found that cardiorespiratory fitness predicts longevity more powerfully than blood pressure, diabetes, or smoking status. The least-fit group had 5× higher mortality risk than the most fit.",find:"Why VO₂ Max is the highest-weighted metric in the bio age score.",href:"https://jamanetwork.com/journals/jamanetworkopen/fullarticle/2707428",domain:"jamanetwork.com"},
+            {tag:"tvo2",lbl:"VO₂ Max",yr:"2022 · ACSM",title:"ACSM Guidelines for Exercise Testing and Prescription (11th Ed.)",auth:"American College of Sports Medicine",plain:"The gold-standard reference for fitness classification, providing sex-specific VO₂ max ranges — Poor to Excellent — for all adult age groups.",find:"Source of all VO₂ Max reference ranges and optimal targets.",href:"https://www.acsm.org/education-resources/books/guidelines-exercise-testing-prescription",domain:"acsm.org"},
+            {tag:"thr",lbl:"Resting HR",yr:"2020 · CMAJ",title:"Resting Heart Rate and Long-Term Survival",auth:"Zhang et al.",plain:"Analysis of 3+ million people: RHR above 80 bpm is independently associated with higher cardiovascular mortality. Each 10 bpm increase correlates with ~18% higher cardiovascular death risk.",find:"Evidence basis for RHR as a longevity metric and risk-tier boundaries.",href:"https://www.cmaj.ca/content/192/8/E176",domain:"cmaj.ca"},
+            {tag:"tbp",lbl:"Blood Pressure",yr:"2017 · AHA/ACC",title:"ACC/AHA High Blood Pressure Clinical Practice Guideline",auth:"Whelton et al.",plain:"The landmark 2017 guideline that lowered the hypertension threshold from 140/90 to 130/80 mmHg, based on the SPRINT trial. Reclassified nearly half of American adults as hypertensive.",find:"Source of all BP reference ranges (Normal/Elevated/Stage 1/Stage 2).",href:"https://www.ahajournals.org/doi/10.1161/HYP.0000000000000065",domain:"ahajournals.org"},
+            {tag:"tbp",lbl:"Blood Pressure",yr:"2015 · NEJM",title:"SPRINT Trial: Systolic Blood Pressure Intervention",auth:"SPRINT Research Group",plain:"RCT of 9,000+ adults: targeting systolic BP below 120 mmHg reduced cardiovascular events by 25% and all-cause mortality by 27%. The trial was halted early due to how compelling the results were.",find:"Evidence for the stricter 120 mmHg optimal BP ceiling used in the dashboard.",href:"https://www.nejm.org/doi/full/10.1056/NEJMoa1511939",domain:"nejm.org"},
+            {tag:"tgl",lbl:"Glucose",yr:"2023 · ADA",title:"Standards of Medical Care in Diabetes",auth:"American Diabetes Association",plain:"Annual clinical guidelines defining fasting glucose categories: Normal (<100), Pre-diabetic (100–125), Diabetic (≥126 mg/dL). Includes population-specific risk guidance for Hispanic/Latino and Black adults.",find:"Source of glucose reference ranges and ethnicity-specific risk adjustments.",href:"https://diabetesjournals.org/care/issue/46/Supplement_1",domain:"diabetesjournals.org"},
+            {tag:"tgl",lbl:"Glucose",yr:"2022 · Longevity",title:"Outlive: The Science and Art of Longevity",auth:"Peter Attia, MD",plain:"A longevity physician's synthesis arguing that even 'normal' fasting glucose (85–99 mg/dL) carries meaningful long-term risk. Advocates a tighter optimal range of 72–85 mg/dL based on CGM and insulin-sensitivity data.",find:"Basis for the tighter Optimal glucose range (60–85 mg/dL) alongside ADA tiers.",href:"https://peterattiamd.com/outlive/",domain:"peterattiamd.com"},
+            {tag:"tbf",lbl:"Body Fat",yr:"2022 · ACE",title:"Body Fat Percentage Norms for Adults",auth:"American Council on Exercise",plain:"Widely used reference ranges stratified by sex — Essential, Athletic, Fit, Average, Obese. Correctly accounts for women naturally carrying more essential fat than men for hormonal and reproductive reasons.",find:"Source of all body fat % reference ranges, with separate female and male targets.",href:"https://www.acefitness.org/resources/everyone/tools-calculators/percent-body-fat-calculator/",domain:"acefitness.org"},
+            {tag:"tbf",lbl:"Body Fat · Ethnicity",yr:"2004 · Lancet",title:"Appropriate BMI for Asian Populations — WHO Expert Consultation",auth:"WHO Expert Consultation",plain:"A WHO review of 10 Asian countries found East and South Asian populations develop type 2 diabetes and cardiovascular disease at significantly lower body fat levels than Western populations.",find:"Basis for lower body fat optimal thresholds for East/South Asian ethnicity selections.",href:"https://www.thelancet.com/journals/lancet/article/PIIS0140-6736(03)15268-3/fulltext",domain:"thelancet.com"},
+            {tag:"tbp",lbl:"BP · Ethnicity",yr:"2020 · Hypertension",title:"Hypertension in Black Adults: Disparities and Clinical Considerations",auth:"Ferdinand & Nasser",plain:"Clinical review documenting that Black and African American adults develop hypertension earlier, at higher rates, and with more severe organ damage. Earlier, more aggressive BP intervention is recommended.",find:"Basis for the lower BP optimal threshold for Black/African American ethnicity.",href:"https://link.springer.com/article/10.1007/s11906-020-1022-0",domain:"link.springer.com"},
+            {tag:"tba",lbl:"Bio Age Formula",yr:"2013 · J. Gerontology",title:"Biological Age Estimation from Clinical Biomarkers",auth:"Levine — Journal of Gerontology: Biological Sciences",plain:"Foundational study showing a composite score from clinical biomarkers predicts mortality better than chronological age alone. Established 'phenotypic age' as a measurable, changeable biological clock.",find:"Conceptual basis for the bio age formula: averaging metric scores mapped to a years-younger offset.",href:"https://academic.oup.com/biomedgerontology/article/68/6/667/556094",domain:"academic.oup.com"},
+            {tag:"tba",lbl:"Metabolic · Ethnicity",yr:"2020 · Lancet D&E",title:"Ethnic Differences in Metabolic Risk at Lower BMI",auth:"The Lancet Diabetes & Endocrinology",plain:"Large review confirming East and South Asian individuals develop insulin resistance and cardiovascular disease at body fat levels well below thresholds derived from European populations.",find:"Supports lower glucose and body fat optimal thresholds for East/South Asian selections.",href:"https://www.thelancet.com/journals/landia/article/PIIS2213-8587(20)30203-4/fulltext",domain:"thelancet.com"},
+          ].map(p=><div key={p.title} className="lp-paper">
+            <div className="lp-pmeta"><span className={`lp-pt lp-${p.tag}`}>{p.lbl}</span><span className="lp-pyr">{p.yr}</span></div>
+            <h4>{p.title}</h4>
+            <div className="lp-pauth">{p.auth}</div>
+            <p className="lp-pp">{p.plain}</p>
+            <div className="lp-pf">→ {p.find}</div>
+            <a href={p.href} target="_blank" rel="noopener">{p.domain}</a>
+          </div>)}
+        </div>
+      </div>
+    </div>
+
+    {/* CTA */}
+    <div className="lp-cta">
+      <h2>Start tracking your<br/><span style={{color:"#00ffa3"}}>real age today.</span></h2>
+      <p>Free, private, science-backed. No sign-up. No upload. Your health data never leaves your device.</p>
+      <button style={{...cta,fontSize:13,padding:"17px 50px",boxShadow:"0 0 60px rgba(0,255,163,.32)"}} onClick={onEnterApp}>Open Dashboard →</button>
+      <p style={{marginTop:18,fontFamily:"'DM Mono',monospace",fontSize:10,color:"#4a6070",letterSpacing:"0.1em"}}>Works on desktop &amp; mobile · Import Apple Health or Google Fit · Or log manually</p>
+    </div>
+
+    <div className="lp-disc">Not medical advice. BioAge is an informational tool based on published clinical guidelines. Reference ranges are population-level norms and may not apply to every individual. Always consult a qualified healthcare provider before making changes to your health regime.</div>
+  </div>;
+}
+
 // ── Main App ──────────────────────────────────────────────────────────────
 export default function BioAgeTracker(){
-  const [entries,setEntries]=useState(SEED);
+  // Entries are session-only — start empty every time, never stored between sessions
+  const [entries,setEntries]=useState([]);
   const [view,setView]=useState("dashboard");
   const [activeMid,setActiveMid]=useState(null);
   const [age,setAge]=useState(40);
@@ -909,16 +1309,17 @@ export default function BioAgeTracker(){
   const [form,setForm]=useState({metricId:"vo2max",value:"",secondary:"",date:new Date().toISOString().split("T")[0],note:""});
 
   useEffect(()=>{(async()=>{try{
-    const r=await window.storage?.get("ba6_entries");if(r?.value)setEntries(JSON.parse(r.value));
+    // Only restore display preferences — health entries are never persisted
     const a=await window.storage?.get("ba6_age");if(a?.value)setAge(+a.value);
     const s=await window.storage?.get("ba6_sex");if(s?.value)setSex(s.value);
     const e=await window.storage?.get("ba6_eth");if(e?.value)setEth(e.value);
   }catch{}})();},[]);
 
-  const persist=useCallback(async e=>{setEntries(e);try{await window.storage?.set("ba6_entries",JSON.stringify(e));}catch{}},[]);
+  // persist() only updates React state — no storage write. Entries are session-only.
+  const persist=useCallback(e=>{setEntries(e);},[]);
 
   const handleImport=({entries:ne,dSex,dDOB})=>{
-    const manual=entries.filter(e=>e.note!=="Apple Health");
+    const manual=entries.filter(e=>e.note!=="Apple Health"&&e.note!=="Google Fit");
     const merged=[...manual];
     ne.forEach(x=>{const i=merged.findIndex(e=>e.metricId===x.metricId&&e.date===x.date);if(i>=0)merged[i]=x;else merged.push(x);});
     persist(merged);
@@ -940,7 +1341,8 @@ export default function BioAgeTracker(){
   const delta=bioAge?+(age-bioAge).toFixed(1):null;
   const scores=MK.map(id=>{const l=getLatest(id);return l?getScore(id,l.value,sex,eth):null;}).filter(Boolean);
   const overall=scores.length?Math.round(scores.reduce((a,b)=>a+b,0)/scores.length):null;
-  const ahCount=entries.filter(e=>e.note==="Apple Health").length;
+  const importCount=entries.filter(e=>e.note==="Apple Health"||e.note==="Google Fit").length;
+  const importSource=entries.some(e=>e.note==="Google Fit")?"Google Fit":entries.some(e=>e.note==="Apple Health")?"Apple Health":null;
   const ethDef=ETHNICITIES.find(e=>e.id===eth);
 
   // Monthly bio age trajectory — one point per month for last 12 months
@@ -1021,7 +1423,7 @@ export default function BioAgeTracker(){
           {[...hist].reverse().map(e=>{const s2=getScore(activeMid,e.value,sex,eth);const c2=gC(s2);return <div key={e.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid #0a1218",fontSize:12,gap:8,flexWrap:"wrap"}}>
             <span style={{color:T.dim}}>{e.date}</span>
             <span style={{color:c2,fontWeight:600}}>{e.value} {m.unit}{e.secondary?` / ${e.secondary}`:""}</span>
-            <span style={{color:"#223344",flex:1}}>{e.note==="Apple Health"?<span style={{fontSize:9,color:"#007744",background:"rgba(0,100,60,0.15)",border:"1px solid rgba(0,150,80,0.2)",borderRadius:4,padding:"2px 7px"}}>⌘ Apple Health</span>:(e.note||"—")}</span>
+            <span style={{color:"#223344",flex:1}}>{e.note==="Apple Health"?<span style={{fontSize:9,color:"#007744",background:"rgba(0,100,60,0.15)",border:"1px solid rgba(0,150,80,0.2)",borderRadius:4,padding:"2px 7px"}}>⌘ Apple Health</span>:e.note==="Google Fit"?<span style={{fontSize:9,color:"#337755",background:"rgba(0,100,60,0.12)",border:"1px solid rgba(0,180,100,0.18)",borderRadius:4,padding:"2px 7px"}}>📊 Google Fit</span>:(e.note||"—")}</span>
             <span style={{color:c2,fontSize:10}}>{gL(s2)}</span>
           </div>;})}
           {!hist.length&&<div style={{fontSize:12,color:"#1e2a3a"}}>No entries yet.</div>}
@@ -1029,6 +1431,22 @@ export default function BioAgeTracker(){
       </div>
     </div>;
   }
+
+  // ── About / Landing Page tab ─────────────────────────────────────────────
+  if(view==="about")return <div style={{minHeight:"100vh",background:T.bg,fontFamily:T.fn,color:T.txt}}>
+    <style>{FONTS}</style>
+    {showImport&&<ImportPanel onImport={handleImport} onClose={()=>setShowImport(false)}/>}
+    {showEth&&<EthModal eth={eth} setEth={e=>{setEth(e);window.storage?.set("ba6_eth",e);}} onClose={()=>setShowEth(false)}/>}
+    <nav style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 22px",borderBottom:`1px solid ${T.bdr}`,background:"rgba(6,10,16,0.97)",backdropFilter:"blur(12px)",position:"sticky",top:0,zIndex:100,flexWrap:"wrap",gap:7}}>
+      <button style={{fontFamily:T.dp,fontSize:17,fontWeight:800,color:T.br,background:"none",border:"none",cursor:"pointer",padding:0}} onClick={()=>setView("dashboard")}><span style={{color:T.gr}}>BIO</span>AGE</button>
+      <div style={{display:"flex",gap:5,alignItems:"center",flexWrap:"wrap"}}>
+        <button style={NB(false)} onClick={()=>setShowImport(true)}>⬆ Import</button>
+        <button style={NB(true)}>ℹ About</button>
+        <button style={{...NB(false),color:T.gr,border:"1px solid rgba(0,255,163,0.25)"}} onClick={()=>setView("dashboard")}>← Dashboard</button>
+      </div>
+    </nav>
+    <LandingPage onEnterApp={()=>setView("dashboard")}/>
+  </div>;
 
   // ── Dashboard ─────────────────────────────────────────────────────────
   return <div style={{minHeight:"100vh",background:T.bg,fontFamily:T.fn,color:T.txt}}>
@@ -1038,15 +1456,16 @@ export default function BioAgeTracker(){
     {showEth&&<EthModal eth={eth} setEth={e=>{setEth(e);window.storage?.set("ba6_eth",e);}} onClose={()=>setShowEth(false)}/>}
 
     <nav style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 22px",borderBottom:`1px solid ${T.bdr}`,background:"rgba(6,10,16,0.97)",backdropFilter:"blur(12px)",position:"sticky",top:0,zIndex:100,flexWrap:"wrap",gap:7}}>
-      <div style={{fontFamily:T.dp,fontSize:17,fontWeight:800,color:T.br}}><span style={{color:T.gr}}>BIO</span>AGE</div>
+      <button style={{fontFamily:T.dp,fontSize:17,fontWeight:800,color:T.br,background:"none",border:"none",cursor:"pointer",padding:0}} onClick={()=>setView("dashboard")}><span style={{color:T.gr}}>BIO</span>AGE</button>
       <div style={{display:"flex",gap:5,alignItems:"center",flexWrap:"wrap"}}>
         <div style={{display:"flex",background:"#0a0e16",border:"1px solid #1e2a3a",borderRadius:7,overflow:"hidden"}}>
           {["female","male"].map(s=><button key={s} onClick={()=>{setSex(s);window.storage?.set("ba6_sex",s);}} style={{padding:"5px 10px",border:"none",cursor:"pointer",fontFamily:T.fn,fontSize:10,background:sex===s?"#0e2218":"transparent",color:sex===s?T.gr:"#334455",transition:"all 0.2s"}}>{s==="female"?"♀ Female":"♂ Male"}</button>)}
         </div>
         <button style={NB(eth!=="general")} onClick={()=>setShowEth(true)}>🌐 {eth==="general"?"Ethnicity":ethDef?.label}</button>
-        {ahCount>0&&<div style={{fontSize:10,color:T.gr,background:"rgba(0,255,163,0.08)",border:"1px solid rgba(0,255,163,0.18)",borderRadius:20,padding:"3px 9px"}}>⌘ {ahCount}</div>}
+        {importCount>0&&<div style={{fontSize:10,color:T.gr,background:"rgba(0,255,163,0.08)",border:"1px solid rgba(0,255,163,0.18)",borderRadius:20,padding:"3px 9px"}}>{importSource==="Google Fit"?"📊":"⌘"} {importCount}</div>}
         <button style={NB(false)} onClick={()=>setShowSnap(true)}>📸 Snapshot</button>
-        <button style={NB(false)} onClick={()=>setShowImport(true)}>⬆ Apple Health</button>
+        <button style={NB(false)} onClick={()=>setShowImport(true)}>⬆ Import</button>
+        <button style={NB(view==="about")} onClick={()=>setView(v=>v==="about"?"dashboard":"about")}>ℹ About</button>
         <button style={NB(false)} onClick={()=>setShowLog(f=>!f)}>{showLog?"✕":"+ Log"}</button>
       </div>
     </nav>
@@ -1072,9 +1491,9 @@ export default function BioAgeTracker(){
     </div>
 
     {/* CTA */}
-    {ahCount===0&&<div style={{margin:"16px 26px 0",background:"rgba(0,255,163,0.03)",border:"1px solid rgba(0,255,163,0.1)",borderRadius:11,padding:"13px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:10}}>
-      <div><div style={{fontFamily:T.dp,fontSize:13,fontWeight:700,color:T.br}}>📱 Connect Apple Health</div>
-        <div style={{fontSize:11,color:T.dim,marginTop:2}}>Import VO₂ Max, RHR, BP, Glucose & Body Fat. Sex & age auto-detected.</div></div>
+    {importCount===0&&<div style={{margin:"16px 26px 0",background:"rgba(0,255,163,0.03)",border:"1px solid rgba(0,255,163,0.1)",borderRadius:11,padding:"13px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:10}}>
+      <div><div style={{fontFamily:T.dp,fontSize:13,fontWeight:700,color:T.br}}>📱 Import your health data</div>
+        <div style={{fontSize:11,color:T.dim,marginTop:2}}>Apple Health (iOS) or Google Fit (Android) — VO₂ Max, RHR, BP, Glucose & Body Fat. Format auto-detected.</div></div>
       <button style={{...BB2,padding:"8px 15px",fontSize:10}} onClick={()=>setShowImport(true)}>Import Now →</button>
     </div>}
 
@@ -1103,6 +1522,8 @@ export default function BioAgeTracker(){
         const trend=hist.length>=2?hist[hist.length-1].value-hist[hist.length-2].value:null;
         const tg=m.higherIsBetter?trend>0:trend<0;
         const ahN=hist.filter(e=>e.note==="Apple Health").length;
+        const gfN=hist.filter(e=>e.note==="Google Fit").length;
+        const srcN=ahN+gfN;const srcLabel=gfN>0?"📊":"⌘";
         return <div key={id} style={{background:T.card,border:`1px solid ${T.bdr}`,borderRadius:13,padding:"18px 20px",cursor:"pointer",transition:"border 0.2s,box-shadow 0.2s",position:"relative",overflow:"hidden"}}
           onClick={()=>{setActiveMid(id);setView("metric");}}
           onMouseEnter={e=>{e.currentTarget.style.border=`1px solid ${col}44`;e.currentTarget.style.boxShadow=`0 0 24px ${col}08`;}}
@@ -1111,7 +1532,7 @@ export default function BioAgeTracker(){
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
             <div>
               <div style={{fontSize:9,letterSpacing:"0.17em",textTransform:"uppercase",color:T.dim,marginBottom:3}}>
-                {m.label}{ahN>0&&<span style={{fontSize:8,color:"#007744",background:"rgba(0,100,60,0.15)",border:"1px solid rgba(0,150,80,0.2)",borderRadius:4,padding:"1px 5px",marginLeft:7}}>⌘ {ahN}</span>}
+                {m.label}{srcN>0&&<span style={{fontSize:8,color:"#007744",background:"rgba(0,100,60,0.15)",border:"1px solid rgba(0,150,80,0.2)",borderRadius:4,padding:"1px 5px",marginLeft:7}}>{srcLabel} {srcN}</span>}
               </div>
               {lat?<div style={{display:"flex",alignItems:"baseline",gap:3}}>
                 <span style={{fontFamily:T.dp,fontSize:32,fontWeight:800,color:col,lineHeight:1.1,textShadow:`0 0 16px ${col}44`}}>{lat.value}</span>
