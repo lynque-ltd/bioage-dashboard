@@ -535,20 +535,34 @@ function rrect(ctx,x,y,w,h,r=6){
   ctx.lineTo(x+r,y+h);ctx.arcTo(x,y+h,x,y+h-r,r);
   ctx.lineTo(x,y+r);ctx.arcTo(x,y,x+r,y,r);ctx.closePath();
 }
-function renderSnapshot(entries,sex,eth,bioAge,chronoAge,days){
-  const W=1500,H=1320;const cv=document.createElement("canvas");cv.width=W;cv.height=H;
-  const ctx=cv.getContext("2d");const now=new Date();
-  const cutoff=new Date();cutoff.setDate(cutoff.getDate()-days);
+// ── Single source of truth for snapshot period ─────────────────────────
+// ALL graphs in the snapshot (bio age trajectory + all 5 metric sparklines)
+// derive their date window from this one function. Any future change to the
+// period logic here automatically applies to every chart — no divergence possible.
+function computeSnapshotPeriod(entries, months){
+  const now=new Date();
+  // Calendar month subtraction: "6 months" = exactly 6 calendar months back from today
+  const cutoff=new Date(now);cutoff.setMonth(cutoff.getMonth()-months);
   let cStr=cutoff.toISOString().substring(0,10);
-  const pLabel=days===30?"Last 30 Days":days===90?"Last 3 Months":"Last 6 Months";
-
-  // Fallback: if no entries fall within the selected window, use all available data
-  const hasWindowData=entries.some(e=>e.date>=cStr);
-  if(!hasWindowData&&entries.length>0){
-    const earliest=entries.map(e=>e.date).sort()[0];
-    cStr=earliest;
-  }
+  const pLabel=months===1?"Last 1 Month":months===3?"Last 3 Months":"Last 6 Months";
+  // Fallback applied ONCE here so bio age trajectory and metric sparklines
+  // always see the same window — they can never diverge from each other.
+  const hasWindowData=entries.length>0&&entries.some(e=>e.date>=cStr);
+  if(!hasWindowData&&entries.length>0) cStr=entries.map(e=>e.date).sort()[0];
   const windowNote=hasWindowData?"":` (all-time — no data in ${pLabel})`;
+  // periodDays and numWeeks derived from the final cStr (post-fallback),
+  // so the bio age weekly-point loop covers exactly the same range as metric sparklines.
+  const cutoffActual=new Date(cStr);
+  const periodDays=Math.max(1,Math.round((now-cutoffActual)/(1000*60*60*24)));
+  const numWeeks=Math.ceil(periodDays/7);
+  return{now,cStr,pLabel,periodDays,numWeeks,windowNote};
+}
+
+function renderSnapshot(entries,sex,eth,bioAge,chronoAge,months){
+  const W=1500,H=1320;const cv=document.createElement("canvas");cv.width=W;cv.height=H;
+  const ctx=cv.getContext("2d");
+  // All period values come from the single shared helper — guaranteed consistent
+  const{now,cStr,pLabel,periodDays,numWeeks,windowNote}=computeSnapshotPeriod(entries,months);
   const ethLabel=ETHNICITIES.find(e=>e.id===eth)?.label||"";
 
   ctx.fillStyle="#060a10";ctx.fillRect(0,0,W,H);
@@ -584,14 +598,13 @@ function renderSnapshot(entries,sex,eth,bioAge,chronoAge,days){
   ctx.fillText(`Weekly · ${pLabel} · vs Chronological Age ${chronoAge}`,TRAJ_X+16,TSEC_Y+36);
 
   // Build weekly bio age data points for the period
-  const numWeeks=Math.ceil(days/7);
   const weekPts=[];
   for(let w=numWeeks;w>=0;w--){
     const d=new Date(now);d.setDate(d.getDate()-w*7);
     const dStr=d.toISOString().substring(0,10);
     if(dStr<cStr)continue;
-    const ba=getBioAge(entries.filter(e=>e.date<=dStr),chronoAge,sex);
-    if(ba)weekPts.push({date:dStr.slice(5),ba:+ba.toFixed(1)});
+    const ba=getBioAge(entries.filter(e=>e.date>=cStr&&e.date<=dStr),chronoAge,sex);
+    if(ba)weekPts.push({date:dStr.slice(0,7),ba:+ba.toFixed(1)});
   }
 
   // Draw bio trajectory chart
@@ -777,8 +790,8 @@ function drawCard(ctx,x,y,w,h,id,entries,sex,eth,cStr){
     ctx.textAlign="left";
     // X-axis date labels
     ctx.fillStyle="#334455";ctx.font="8px monospace";
-    ctx.fillText(period[0].date.slice(5),SX,SY+SH+12);
-    const el=period[period.length-1].date.slice(5);ctx.fillText(el,SX+SW-ctx.measureText(el).width,SY+SH+12);
+    ctx.fillText(period[0].date.slice(0,7),SX,SY+SH+12);
+    const el=period[period.length-1].date.slice(0,7);ctx.fillText(el,SX+SW-ctx.measureText(el).width,SY+SH+12);
   }else{ctx.fillStyle="#1a2a3a";ctx.font="11px monospace";ctx.fillText("No data for this period",PX,SY+SH/2);}
   // range bar with value labels
   const BY=y+h-42,BX=PX,BW=w-36,BH=5;const{cMin,cMax,ranges,opt}=m;const tot=cMax-cMin;
@@ -895,7 +908,7 @@ function ImpactPanel({entries,age,sex,eth}){
 
 // ── Snapshot Modal ────────────────────────────────────────────────────────
 function SnapshotModal({entries,sex,eth,bioAge,chronoAge,onClose}){
-  const [period,setPeriod]=useState(30);
+  const [period,setPeriod]=useState(1);
   const [img,setImg]=useState(null);
   const [rendering,setRendering]=useState(false);
   const [renderErr,setRenderErr]=useState(null);
@@ -919,7 +932,7 @@ function SnapshotModal({entries,sex,eth,bioAge,chronoAge,onClose}){
 
   useEffect(()=>{render();},[render]);
 
-  const fname=`bioage-${period===30?"1mo":period===90?"3mo":"6mo"}-${new Date().toISOString().substring(0,10)}.jpg`;
+  const fname=`bioage-${period===1?"1mo":period===3?"3mo":"6mo"}-${new Date().toISOString().substring(0,10)}.jpg`;
 
   const download=()=>{
     const cv=cvRef.current;if(!cv)return;
@@ -949,9 +962,9 @@ function SnapshotModal({entries,sex,eth,bioAge,chronoAge,onClose}){
       <div style={{fontFamily:T.dp,fontSize:18,fontWeight:800,color:T.br,marginBottom:4}}>Export Snapshot</div>
       <div style={{fontSize:11,color:T.dim,marginBottom:18}}>JPEG of all 5 metric trends for the chosen period. Use "Open in New Tab" if the download button doesn't trigger a file dialog.</div>
       <div style={{display:"flex",gap:8,marginBottom:18}}>
-        <button style={pb(30)} onClick={()=>setPeriod(30)}>1 Month</button>
-        <button style={pb(90)} onClick={()=>setPeriod(90)}>3 Months</button>
-        <button style={pb(180)} onClick={()=>setPeriod(180)}>6 Months</button>
+        <button style={pb(1)} onClick={()=>setPeriod(1)}>1 Month</button>
+        <button style={pb(3)} onClick={()=>setPeriod(3)}>3 Months</button>
+        <button style={pb(6)} onClick={()=>setPeriod(6)}>6 Months</button>
       </div>
       <div style={{borderRadius:10,overflow:"hidden",border:"1px solid #0e1824",marginBottom:14,minHeight:200,display:"flex",alignItems:"center",justifyContent:"center",background:"#060a10"}}>
         {rendering
@@ -1199,7 +1212,102 @@ const LP_CSS=`
 .lp-cta p{font-size:15px;color:#7a9aaa;max-width:440px;margin:0 auto 38px;line-height:1.72;}
 .lp-disc{padding:28px 48px;border-top:1px solid #0e1824;font-size:11px;color:#2a3a4a;line-height:1.65;max-width:900px;margin:0 auto;}
 @media(max-width:820px){.lp-mrow{grid-template-columns:1fr;}.lp-mrow>div{border-right:none;border-bottom:1px solid #0e1824;}.lp-mrow>div:last-child{border-bottom:none;}.lp-priv{padding:26px 22px;}}
+.lp-faq{display:flex;flex-direction:column;gap:0;}
+.lp-faq-q{background:#0a0e16;border:1px solid #0e1824;margin-bottom:2px;border-radius:8px;overflow:hidden;transition:border-color .2s;}
+.lp-faq-q:hover{border-color:#162030;}
+.lp-faq-q.open{border-color:rgba(0,255,163,.18);}
+.lp-faq-hdr{display:flex;justify-content:space-between;align-items:center;padding:20px 24px;cursor:pointer;gap:16px;}
+.lp-faq-hdr h4{font-family:'Syne',sans-serif;font-size:15px;font-weight:700;color:#e0eeff;margin:0;line-height:1.3;}
+.lp-faq-icon{font-family:'DM Mono',monospace;font-size:14px;color:#00ffa3;flex-shrink:0;transition:transform .2s;}
+.lp-faq-q.open .lp-faq-icon{transform:rotate(45deg);}
+.lp-faq-body{padding:0 24px 22px;font-size:13px;color:#7a9aaa;line-height:1.85;}
+.lp-faq-body p{margin:0 0 12px;}
+.lp-faq-body p:last-child{margin-bottom:0;}
+.lp-faq-body .faq-cite{display:inline-flex;align-items:center;gap:4px;font-family:'DM Mono',monospace;font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:#00ffa3;background:rgba(0,255,163,.07);border:1px solid rgba(0,255,163,.2);border-radius:4px;padding:2px 7px;margin-left:4px;text-decoration:none;vertical-align:middle;}
+.lp-faq-body .faq-cite:hover{background:rgba(0,255,163,.14);}
+.lp-faq-body .faq-hl{color:#e0eeff;font-weight:600;}
+.lp-faq-body ul{margin:8px 0 12px 16px;padding:0;}
+.lp-faq-body li{margin-bottom:7px;}
+
 `;
+
+function FAQ(){
+  const [open,setOpen]=React.useState(null);
+  const qs=[
+    {
+      id:"meaning",
+      q:"What does it mean if my bio age is higher or lower than my real age?",
+      a:<>
+        <p>Think of biological age as a measure of how well your body is actually functioning — not just how many birthdays you've had. Two people who are both 50 years old can have very different bodies on the inside depending on their lifestyle, genetics, and health history.</p>
+        <p><span className="faq-hl">If your bio age is lower than your chronological age</span> — say you're 50 but your bio age comes back as 44 — that's a genuinely good sign. It means the measurable health markers used here (cardiorespiratory fitness, heart rate, blood pressure, blood sugar, and body fat) are performing like those of a healthier, physiologically younger person. Research shows this correlates strongly with lower risk of heart disease, diabetes, and early death. <a className="faq-cite" href="https://jamanetwork.com/journals/jamanetworkopen/fullarticle/2707428" target="_blank" rel="noopener">Mandsager 2018 ↗</a></p>
+        <p><span className="faq-hl">If your bio age is higher than your chronological age</span> — say you're 50 but your bio age comes back as 57 — it means one or more of your key health markers are underperforming for your age group. This is a signal to pay attention, not a diagnosis. The good news: these markers are changeable. Cardiorespiratory fitness alone, for example, is more responsive to lifestyle intervention than almost any other health metric. <a className="faq-cite" href="https://jamanetwork.com/journals/jamanetworkopen/fullarticle/2707428" target="_blank" rel="noopener">Mandsager 2018 ↗</a></p>
+        <p>The important thing is that this number is a direction-finder, not a verdict. A bio age that's currently older than your real age is telling you which levers to pull — and the Impact Plan below the dashboard tells you exactly which ones move the needle most for you personally.</p>
+      </>
+    },
+    {
+      id:"formula",
+      q:"How is bio age actually calculated — and why are some metrics weighted more than others?",
+      a:<>
+        <p>The formula used here is based on the <span className="faq-hl">Klemera-Doubal Method (KDM)</span>, which is the most well-validated algorithm for computing biological age from clinical biomarkers. It consistently outperforms simpler approaches like averaging scores or using principal component analysis. <a className="faq-cite" href="https://pubmed.ncbi.nlm.nih.gov/16318865/" target="_blank" rel="noopener">Klemera & Doubal 2006 ↗</a></p>
+        <p>Here's the core idea in plain English: each of the five metrics is first modelled against how it typically changes with age in the general population. For example, VO₂ Max (cardiorespiratory fitness) tends to decline by about 0.38–0.46 mL/kg/min every year in adults. Blood pressure tends to rise by about 0.45 mmHg per year. These age-tracking curves come from large population studies including NHANES III, the FRIEND Registry, and ACSM/AHA/ADA reference data.</p>
+        <p>Your individual reading is then compared to that curve: <span className="faq-hl">what age does your VO₂ Max value imply? What age does your glucose imply?</span> Each metric produces its own "implied age". Those implied ages are combined into one number — but not with equal weight. A metric is given more influence if it tracks age more precisely in the population (smaller variability around the regression line), and less influence if it's noisier.</p>
+        <p>This is why <span className="faq-hl">VO₂ Max carries the most weight</span>: it is the single strongest predictor of all-cause mortality ever measured in a large population study, outperforming blood pressure, cholesterol, diabetes, and even smoking. A one-unit improvement in VO₂ Max reduces all-cause mortality risk by roughly 13%. <a className="faq-cite" href="https://jamanetwork.com/journals/jamanetworkopen/fullarticle/2707428" target="_blank" rel="noopener">Mandsager 2018 ↗</a></p>
+        <p>Finally, the formula anchors the estimate toward your actual chronological age when data is sparse — so if you've only logged two of the five metrics, the result is appropriately conservative rather than wildly skewed.</p>
+      </>
+    },
+    {
+      id:"personalization",
+      q:"How does age, sex, and ethnicity change my results?",
+      a:<>
+        <p>The reference ranges and targets are not one-size-fits-all. Three dimensions of your profile adjust the calculation:</p>
+        <p><span className="faq-hl">Age:</span> The KDM formula is age-aware by design — it compares your biomarker values against population norms for your age decade, not against a single universal reference. A VO₂ Max of 32 mL/kg/min means something different for a 30-year-old than a 65-year-old. The ACSM publishes sex- and age-stratified fitness norms used here. <a className="faq-cite" href="https://acsm.org/education-resources/books/guidelines-exercise-testing-prescription/" target="_blank" rel="noopener">ACSM 2022 ↗</a></p>
+        <p><span className="faq-hl">Sex:</span> Several metrics have meaningfully different reference ranges for females vs. males. Women naturally carry more essential body fat (due to hormonal and reproductive function), have different VO₂ Max norms, and have historically had lower rates of hypertension in younger age groups. All ranges and optimal targets in this app are sex-specific. ACE, ACSM, and AHA all publish sex-stratified norms. <a className="faq-cite" href="https://www.acefitness.org/education-and-resources/lifestyle/blog/112/what-are-the-guidelines-for-percentage-of-body-fat-loss/" target="_blank" rel="noopener">ACE norms ↗</a></p>
+        <p><span className="faq-hl">Ethnicity:</span> Research shows that cardiometabolic risk develops at different thresholds across ethnic groups — and that applying Western population norms universally can miss real risk. Three key adjustments are made based on peer-reviewed evidence:</p>
+        <ul>
+          <li><span className="faq-hl">South Asian and East Asian:</span> WHO and Lancet research shows these groups develop insulin resistance and cardiovascular disease at lower body fat levels than European populations. Optimal body fat and glucose targets are adjusted tighter. <a className="faq-cite" href="https://www.thelancet.com/journals/lancet/article/PIIS0140-6736(03)15268-3/fulltext" target="_blank" rel="noopener">WHO 2004 ↗</a> <a className="faq-cite" href="https://www.thelancet.com/journals/landia/article/PIIS2213-8587(20)30203-4/fulltext" target="_blank" rel="noopener">Lancet 2020 ↗</a></li>
+          <li><span className="faq-hl">Black / African American:</span> AHA and ACC evidence documents earlier onset and higher severity of hypertension in this group. The optimal blood pressure target is adjusted to a tighter ceiling. <a className="faq-cite" href="https://pmc.ncbi.nlm.nih.gov/articles/PMC7301145/" target="_blank" rel="noopener">Ferdinand 2020 ↗</a></li>
+          <li><span className="faq-hl">Hispanic / Latino:</span> ADA data shows the highest rates of type 2 diabetes prevalence in this group, supporting a tighter optimal glucose range. <a className="faq-cite" href="https://diabetesjournals.org/care/issue/46/Supplement_1" target="_blank" rel="noopener">ADA 2023 ↗</a></li>
+        </ul>
+        <p>These are population-level adjustments, not individual diagnoses. Always discuss your personal health thresholds with a physician.</p>
+      </>
+    },
+    {
+      id:"plan",
+      q:"How is my priority action plan personalised for me?",
+      a:<>
+        <p>The priority ranking isn't generic advice — it's computed specifically from your data. Here's how it works:</p>
+        <p>For each metric where you have data, the app asks: <span className="faq-hl">"If this one metric improved to its optimal target, how many years younger would my bio age become?"</span> It computes this by running the KDM bio age formula twice — once with your actual readings, and once with that one metric swapped to its optimal value while everything else stays the same. The difference is your potential gain in years for that metric.</p>
+        <p>The metric with the largest potential gain is ranked #1 in your Impact Plan. This means if your glucose is in the pre-diabetic range and your VO₂ Max is already excellent, glucose will appear at the top — even though in a general population sense, VO₂ Max is considered the most important metric. The ranking is always your ranking, not a generic one.</p>
+        <p>The recommendations for each metric come in three tiers based on your current score — Good, Fair, or Needs Work — with protocols sourced from:</p>
+        <ul>
+          <li><span className="faq-hl">VO₂ Max:</span> ACSM Zone 2 and interval training protocols. Each 1 MET improvement reduces all-cause mortality by ~13%. <a className="faq-cite" href="https://jamanetwork.com/journals/jamanetworkopen/fullarticle/2707428" target="_blank" rel="noopener">Mandsager 2018 ↗</a></li>
+          <li><span className="faq-hl">Resting Heart Rate:</span> AHA sleep, alcohol, and endurance guidance. <a className="faq-cite" href="https://www.cmaj.ca/content/188/3/E53" target="_blank" rel="noopener">Zhang 2016 ↗</a></li>
+          <li><span className="faq-hl">Blood Pressure:</span> DASH diet and sodium protocols from AHA/ACC and SPRINT trial. <a className="faq-cite" href="https://www.nejm.org/doi/full/10.1056/NEJMoa1511939" target="_blank" rel="noopener">SPRINT 2015 ↗</a></li>
+          <li><span className="faq-hl">Fasting Glucose:</span> ADA dietary guidance and Peter Attia's longevity-focused targets. <a className="faq-cite" href="https://diabetesjournals.org/care/issue/46/Supplement_1" target="_blank" rel="noopener">ADA 2023 ↗</a></li>
+          <li><span className="faq-hl">Body Fat:</span> ACE resistance training and protein targets. <a className="faq-cite" href="https://www.acefitness.org/education-and-resources/lifestyle/blog/112/what-are-the-guidelines-for-percentage-of-body-fat-loss/" target="_blank" rel="noopener">ACE norms ↗</a></li>
+        </ul>
+        <p>Nothing in the plan is a medical prescription. It is a translation of clinical guidelines into plain-English starting points. Always work with a healthcare professional on your specific situation.</p>
+      </>
+    },
+  ];
+  return <div className="lp-sec" style={{background:"rgba(7,10,17,.9)",padding:"88px 24px",maxWidth:"100%"}}>
+    <div style={{maxWidth:1080,margin:"0 auto"}}>
+      <div className="lp-lbl">FAQ</div>
+      <h2>Questions, answered<br/>in plain English</h2>
+      <p style={{fontSize:14,color:"#7a9aaa",lineHeight:1.8,maxWidth:580,marginBottom:44}}>No medical jargon. Just clear answers to the questions we get asked most — with the research linked so you can go deeper if you want.</p>
+      <div className="lp-faq">
+        {qs.map(item=><div key={item.id} className={`lp-faq-q${open===item.id?" open":""}`}>
+          <div className="lp-faq-hdr" onClick={()=>setOpen(open===item.id?null:item.id)}>
+            <h4>{item.q}</h4>
+            <span className="lp-faq-icon">+</span>
+          </div>
+          {open===item.id&&<div className="lp-faq-body">{item.a}</div>}
+        </div>)}
+      </div>
+    </div>
+  </div>;
+}
+
 function LandingPage({onEnterApp}){
   const P=({cls,children,...r})=><div className={`lp-paper ${cls||""}`} {...r}>{children}</div>;
   const cta={display:"inline-block",background:"#00ffa3",color:"#030a06",fontFamily:"'DM Mono',monospace",fontSize:12,fontWeight:500,letterSpacing:"0.11em",textTransform:"uppercase",padding:"15px 44px",borderRadius:8,border:"none",cursor:"pointer",transition:"all 0.22s",boxShadow:"0 0 50px rgba(0,255,163,0.3)"};
@@ -1262,21 +1370,6 @@ function LandingPage({onEnterApp}){
       </div>
     </div>
 
-    {/* Privacy */}
-    <div className="lp-sec" style={{padding:"88px 24px"}}>
-      <div className="lp-priv">
-        <div style={{fontSize:42,flexShrink:0,marginTop:4}}>🔒</div>
-        <div>
-          <h3>Your health data never leaves your device</h3>
-          <p>BioAge runs entirely in your browser. Apple Health ZIPs are decompressed via the browser's built-in DecompressionStream API; Google Fit ZIPs are parsed file-by-file in memory — no data is ever sent to a server. There are no accounts, no databases, and no analytics on your health information.</p>
-          <p style={{marginTop:10}}>Health entries are <b style={{color:"#e0eeff"}}>session-only</b>: they live in memory while the tab is open and are permanently gone the moment you close it.</p>
-          <div className="lp-ptags">
-            {["Zero upload","No accounts","No server storage","Session-only health data","No health analytics"].map(t=><span key={t} className="lp-ptag">{t}</span>)}
-          </div>
-        </div>
-      </div>
-    </div>
-
     {/* The 5 metrics */}
     <div className="lp-sec" style={{background:"rgba(8,12,20,.55)",padding:"88px 24px",maxWidth:"100%"}}>
       <div style={{maxWidth:1080,margin:"0 auto"}}>
@@ -1300,6 +1393,24 @@ function LandingPage({onEnterApp}){
       </div>
     </div>
 
+    {/* FAQ */}
+    <FAQ/>
+
+    {/* Privacy */}
+    <div className="lp-sec" style={{padding:"88px 24px"}}>
+      <div className="lp-priv">
+        <div style={{fontSize:42,flexShrink:0,marginTop:4}}>🔒</div>
+        <div>
+          <h3>Your health data never leaves your device</h3>
+          <p>BioAge runs entirely in your browser. Apple Health ZIPs are decompressed via the browser's built-in DecompressionStream API; Google Fit ZIPs are parsed file-by-file in memory — no data is ever sent to a server. There are no accounts, no databases, and no analytics on your health information.</p>
+          <p style={{marginTop:10}}>Health entries are <b style={{color:"#e0eeff"}}>session-only</b>: they live in memory while the tab is open and are permanently gone the moment you close it.</p>
+          <div className="lp-ptags">
+            {["Zero upload","No accounts","No server storage","Session-only health data","No health analytics"].map(t=><span key={t} className="lp-ptag">{t}</span>)}
+          </div>
+        </div>
+      </div>
+    </div>
+
     {/* Research */}
     <div className="lp-sec" style={{background:"rgba(7,11,18,.75)",padding:"88px 24px",maxWidth:"100%"}}>
       <div style={{maxWidth:1080,margin:"0 auto"}}>
@@ -1309,15 +1420,15 @@ function LandingPage({onEnterApp}){
         <div className="lp-rgrid">
           {[
             {tag:"tvo2",lbl:"VO₂ Max",yr:"2018 · JAMA",title:"VO₂ Max as a Predictor of All-Cause Mortality",auth:"Mandsager et al.",plain:"A study of 122,000 patients found that cardiorespiratory fitness predicts longevity more powerfully than blood pressure, diabetes, or smoking status. The least-fit group had 5× higher mortality risk than the most fit.",find:"Why VO₂ Max is the highest-weighted metric in the bio age score.",href:"https://jamanetwork.com/journals/jamanetworkopen/fullarticle/2707428",domain:"jamanetwork.com"},
-            {tag:"tvo2",lbl:"VO₂ Max",yr:"2022 · ACSM",title:"ACSM Guidelines for Exercise Testing and Prescription (11th Ed.)",auth:"American College of Sports Medicine",plain:"The gold-standard reference for fitness classification, providing sex-specific VO₂ max ranges — Poor to Excellent — for all adult age groups.",find:"Source of all VO₂ Max reference ranges and optimal targets.",href:"https://www.acsm.org/education-resources/books/guidelines-exercise-testing-prescription",domain:"acsm.org"},
-            {tag:"thr",lbl:"Resting HR",yr:"2020 · CMAJ",title:"Resting Heart Rate and Long-Term Survival",auth:"Zhang et al.",plain:"Analysis of 3+ million people: RHR above 80 bpm is independently associated with higher cardiovascular mortality. Each 10 bpm increase correlates with ~18% higher cardiovascular death risk.",find:"Evidence basis for RHR as a longevity metric and risk-tier boundaries.",href:"https://www.cmaj.ca/content/192/8/E176",domain:"cmaj.ca"},
+            {tag:"tvo2",lbl:"VO₂ Max",yr:"2022/2024 · ACSM",title:"ACSM Guidelines for Exercise Testing and Prescription (11th Ed.)",auth:"American College of Sports Medicine",plain:"The gold-standard reference for fitness classification, providing sex-specific VO₂ max ranges — Poor to Excellent — for all adult age groups.",find:"Source of all VO₂ Max reference ranges and optimal targets.",href:"https://acsm.org/education-resources/books/guidelines-exercise-testing-prescription/",domain:"acsm.org"},
+            {tag:"thr",lbl:"Resting HR",yr:"2016 · CMAJ",title:"Resting Heart Rate and Long-Term Survival",auth:"Zhang et al.",plain:"Analysis of 3+ million people: RHR above 80 bpm is independently associated with higher cardiovascular mortality. Each 10 bpm increase correlates with ~18% higher cardiovascular death risk.",find:"Evidence basis for RHR as a longevity metric and risk-tier boundaries.",href:"https://www.cmaj.ca/content/188/3/E53",domain:"cmaj.ca"},
             {tag:"tbp",lbl:"Blood Pressure",yr:"2017 · AHA/ACC",title:"ACC/AHA High Blood Pressure Clinical Practice Guideline",auth:"Whelton et al.",plain:"The landmark 2017 guideline that lowered the hypertension threshold from 140/90 to 130/80 mmHg, based on the SPRINT trial. Reclassified nearly half of American adults as hypertensive.",find:"Source of all BP reference ranges (Normal/Elevated/Stage 1/Stage 2).",href:"https://www.ahajournals.org/doi/10.1161/HYP.0000000000000065",domain:"ahajournals.org"},
             {tag:"tbp",lbl:"Blood Pressure",yr:"2015 · NEJM",title:"SPRINT Trial: Systolic Blood Pressure Intervention",auth:"SPRINT Research Group",plain:"RCT of 9,000+ adults: targeting systolic BP below 120 mmHg reduced cardiovascular events by 25% and all-cause mortality by 27%. The trial was halted early due to how compelling the results were.",find:"Evidence for the stricter 120 mmHg optimal BP ceiling used in the dashboard.",href:"https://www.nejm.org/doi/full/10.1056/NEJMoa1511939",domain:"nejm.org"},
             {tag:"tgl",lbl:"Glucose",yr:"2023 · ADA",title:"Standards of Medical Care in Diabetes",auth:"American Diabetes Association",plain:"Annual clinical guidelines defining fasting glucose categories: Normal (<100), Pre-diabetic (100–125), Diabetic (≥126 mg/dL). Includes population-specific risk guidance for Hispanic/Latino and Black adults.",find:"Source of glucose reference ranges and ethnicity-specific risk adjustments.",href:"https://diabetesjournals.org/care/issue/46/Supplement_1",domain:"diabetesjournals.org"},
-            {tag:"tgl",lbl:"Glucose",yr:"2022 · Longevity",title:"Outlive: The Science and Art of Longevity",auth:"Peter Attia, MD",plain:"A longevity physician's synthesis arguing that even 'normal' fasting glucose (85–99 mg/dL) carries meaningful long-term risk. Advocates a tighter optimal range of 72–85 mg/dL based on CGM and insulin-sensitivity data.",find:"Basis for the tighter Optimal glucose range (60–85 mg/dL) alongside ADA tiers.",href:"https://peterattiamd.com/outlive/",domain:"peterattiamd.com"},
-            {tag:"tbf",lbl:"Body Fat",yr:"2022 · ACE",title:"Body Fat Percentage Norms for Adults",auth:"American Council on Exercise",plain:"Widely used reference ranges stratified by sex — Essential, Athletic, Fit, Average, Obese. Correctly accounts for women naturally carrying more essential fat than men for hormonal and reproductive reasons.",find:"Source of all body fat % reference ranges, with separate female and male targets.",href:"https://www.acefitness.org/resources/everyone/tools-calculators/percent-body-fat-calculator/",domain:"acefitness.org"},
+            {tag:"tgl",lbl:"Glucose",yr:"2022 · Longevity",title:"Outlive: The Science and Art of Longevity",auth:"Peter Attia, MD",plain:"A longevity physician's synthesis arguing that even 'normal' fasting glucose (85–99 mg/dL) carries meaningful long-term risk. Advocates a tighter optimal range of 72–85 mg/dL based on CGM and insulin-sensitivity data.",find:"Basis for the tighter Optimal glucose range (60–85 mg/dL) alongside ADA tiers.",href:"https://peterattiamd.com/category/metabolic-health/glucose-and-insulin/",domain:"peterattiamd.com"},
+            {tag:"tbf",lbl:"Body Fat",yr:"2022 · ACE",title:"Body Fat Percentage Norms for Adults",auth:"American Council on Exercise",plain:"Widely used reference ranges stratified by sex — Essential, Athletic, Fit, Average, Obese. Correctly accounts for women naturally carrying more essential fat than men for hormonal and reproductive reasons.",find:"Source of all body fat % reference ranges, with separate female and male targets.",href:"https://www.acefitness.org/education-and-resources/lifestyle/blog/112/what-are-the-guidelines-for-percentage-of-body-fat-loss/",domain:"acefitness.org"},
             {tag:"tbf",lbl:"Body Fat · Ethnicity",yr:"2004 · Lancet",title:"Appropriate BMI for Asian Populations — WHO Expert Consultation",auth:"WHO Expert Consultation",plain:"A WHO review of 10 Asian countries found East and South Asian populations develop type 2 diabetes and cardiovascular disease at significantly lower body fat levels than Western populations.",find:"Basis for lower body fat optimal thresholds for East/South Asian ethnicity selections.",href:"https://www.thelancet.com/journals/lancet/article/PIIS0140-6736(03)15268-3/fulltext",domain:"thelancet.com"},
-            {tag:"tbp",lbl:"BP · Ethnicity",yr:"2020 · Hypertension",title:"Hypertension in Black Adults: Disparities and Clinical Considerations",auth:"Ferdinand & Nasser",plain:"Clinical review documenting that Black and African American adults develop hypertension earlier, at higher rates, and with more severe organ damage. Earlier, more aggressive BP intervention is recommended.",find:"Basis for the lower BP optimal threshold for Black/African American ethnicity.",href:"https://link.springer.com/article/10.1007/s11906-020-1022-0",domain:"link.springer.com"},
+            {tag:"tbp",lbl:"BP · Ethnicity",yr:"2020 · Hypertension",title:"Hypertension in Black Adults: Disparities and Clinical Considerations",auth:"Ferdinand & Nasser",plain:"Clinical review documenting that Black and African American adults develop hypertension earlier, at higher rates, and with more severe organ damage. Earlier, more aggressive BP intervention is recommended.",find:"Basis for the lower BP optimal threshold for Black/African American ethnicity.",href:"https://pmc.ncbi.nlm.nih.gov/articles/PMC7301145/",domain:"pmc.ncbi.nlm.nih.gov"},
             {tag:"tba",lbl:"Bio Age Formula",yr:"2006 · Mech Ageing Dev",title:"A New Approach to the Concept and Computation of Biological Age",auth:"Klemera & Doubal",plain:"The foundational paper introducing KDM — Klemera-Doubal Method. Instead of simple averages, KDM treats each biomarker as a regression on chronological age, weights it by how precisely it tracks age in the population, and combines implied ages into a single estimate that can be younger OR older than chronological age.",find:"The mathematical basis of the bio age formula used in this dashboard. Consistently outperforms simple averaging, PCA, and multiple linear regression in mortality prediction.",href:"https://pubmed.ncbi.nlm.nih.gov/16318865/",domain:"pubmed.ncbi.nlm.nih.gov"},
             {tag:"tba",lbl:"Metabolic · Ethnicity",yr:"2020 · Lancet D&E",title:"Ethnic Differences in Metabolic Risk at Lower BMI",auth:"The Lancet Diabetes & Endocrinology",plain:"Large review confirming East and South Asian individuals develop insulin resistance and cardiovascular disease at body fat levels well below thresholds derived from European populations.",find:"Supports lower glucose and body fat optimal thresholds for East/South Asian selections.",href:"https://www.thelancet.com/journals/landia/article/PIIS2213-8587(20)30203-4/fulltext",domain:"thelancet.com"},
           ].map(p=><div key={p.title} className="lp-paper">
@@ -1348,7 +1459,7 @@ function LandingPage({onEnterApp}){
 export default function BioAgeTracker(){
   // Entries are session-only — start empty every time, never stored between sessions
   const [entries,setEntries]=useState([]);
-  const [view,setView]=useState("dashboard");
+  const [view,setView]=useState("about");
   const [activeMid,setActiveMid]=useState(null);
   const [age,setAge]=useState(40);
   const [sex,setSex]=useState("female");
@@ -1423,7 +1534,7 @@ export default function BioAgeTracker(){
     const sc=lat?getScore(activeMid,lat.value,sex,eth):null;
     const col=sc?gC(sc):"#334455";
     const refLine=m.higherIsBetter?m.opt.min:m.opt.max;
-    const cd=hist.map(e=>({date:e.date.substring(5),[m.label]:e.value,...(e.secondary?{Diastolic:e.secondary}:{})}));
+    const cd=hist.map(e=>({date:e.date,[m.label]:e.value,...(e.secondary?{Diastolic:e.secondary}:{})}));
     return <div style={{minHeight:"100vh",background:T.bg,fontFamily:T.fn,color:T.txt}}>
       <style>{FONTS}</style>
       <nav style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"14px 26px",borderBottom:`1px solid ${T.bdr}`,background:"rgba(6,10,16,0.97)",position:"sticky",top:0,zIndex:100}}>
@@ -1460,7 +1571,7 @@ export default function BioAgeTracker(){
                 <stop offset="0%" stopColor={col} stopOpacity={0.22}/><stop offset="100%" stopColor={col} stopOpacity={0}/>
               </linearGradient></defs>
               <CartesianGrid stroke="#0e1824" strokeDasharray="3 3"/>
-              <XAxis dataKey="date" tick={{fill:T.dim,fontSize:10,fontFamily:T.fn}}/>
+              <XAxis dataKey="date" tick={{fill:T.dim,fontSize:9,fontFamily:T.fn}} tickFormatter={d=>{const p=d.split("-");return p.length>=2?new Date(+p[0],+p[1]-1,1).toLocaleDateString("en-US",{month:"short",year:"2-digit"}):"";}}/>
               <YAxis domain={[m.cMin,m.cMax]} tick={{fill:T.dim,fontSize:10,fontFamily:T.fn}}/>
               <Tooltip content={<CTip/>}/>
               <ReferenceLine y={refLine} stroke={T.gr} strokeDasharray="4 4" strokeOpacity={0.45}
