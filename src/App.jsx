@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
+import { Analytics } from "@vercel/analytics/react";
 
 // ── Ethnicity config ──────────────────────────────────────────────────────
 const ETHNICITIES = [
@@ -1749,5 +1750,6 @@ export default function BioAgeTracker(){
     <div style={{padding:"0 26px 28px",fontSize:9,color:"#1a2530",lineHeight:2}}>
       VO₂ Max: ACSM by sex/age · Body Fat: ACE by sex · RHR: AHA · BP: AHA 2017 · Glucose: ADA + Attia · Ethnicity: WHO 2004, ADA, Lancet 2020 · Not medical advice
     </div>
+    <Analytics />
   </div>;
 }
