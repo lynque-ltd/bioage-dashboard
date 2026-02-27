@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
+import { Analytics } from "@vercel/analytics/react";
 
 // ── Ethnicity config ──────────────────────────────────────────────────────
 const ETHNICITIES = [
@@ -1229,7 +1230,190 @@ const LP_CSS=`
 .lp-faq-body ul{margin:8px 0 12px 16px;padding:0;}
 .lp-faq-body li{margin-bottom:7px;}
 
+.lp-mockup-wrap{padding:0 24px 0;background:linear-gradient(180deg,rgba(6,10,16,0) 0%,rgba(6,10,16,.7) 100%);position:relative;}
+.lp-mockup-inner{max-width:1080px;margin:0 auto;position:relative;}
+.lp-mockup-label{text-align:center;font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:#2a3a4a;margin-bottom:20px;}
+.lp-mockup-label span{color:#00ffa3;}
+.lp-mockup-frame{border-radius:14px;overflow:hidden;border:1px solid #0e1824;box-shadow:0 0 0 1px rgba(0,255,163,.06),0 40px 120px rgba(0,0,0,.8),0 0 60px rgba(0,255,163,.04);background:#060a10;position:relative;}
+.lp-mockup-frame::before{content:'';position:absolute;inset:0;background:linear-gradient(180deg,transparent 70%,rgba(6,10,16,.9) 100%);pointer-events:none;z-index:2;}
+.lp-mockup-fade{position:absolute;bottom:0;left:0;right:0;height:120px;background:linear-gradient(180deg,transparent 0%,#060a10 100%);z-index:3;border-radius:0 0 14px 14px;}
+
 `;
+
+// ── Dashboard screenshot mockup for landing page ─────────────────────────
+function DashboardMockup(){
+  const G="#00ffa3",D="#060a10",C="#0a0e16",B="#0e1824",DM="#334455",BR="#e0eeff";
+  const T={gr:G,bg:D,card:C,bdr:B,dim:DM,txt:BR,fn:"'DM Mono',monospace",dp:"'Syne',sans-serif"};
+  // Same color function as the real dashboard — score drives color, not metric type
+  const gC=s=>s>=85?"#00ffa3":s>=65?"#7feba1":s>=45?"#f0c060":"#ff6b6b";
+
+  // Sparkline component — simple SVG line chart
+  const Spark=({pts,col,h=28})=>{
+    const mn=Math.min(...pts),mx=Math.max(...pts),r=mx-mn||1;
+    const w=100,pad=4;
+    const x=i=>pad+(i/(pts.length-1))*(w-pad*2);
+    const y=v=>h-pad-((v-mn)/r)*(h-pad*2);
+    const d="M"+pts.map((v,i)=>`${x(i).toFixed(1)},${y(v).toFixed(1)}`).join("L");
+    const af=`M${x(0)},${h} L${d.slice(1)} L${x(pts.length-1)},${h}Z`;
+    const id="sg"+Math.random().toString(36).slice(2,6);
+    return <svg width="100%" height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" style={{overflow:"visible"}}>
+      <defs><linearGradient id={id} x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stopColor={col} stopOpacity="0.22"/>
+        <stop offset="100%" stopColor={col} stopOpacity="0.01"/>
+      </linearGradient></defs>
+      <path d={af} fill={`url(#${id})`}/>
+      <path d={d} fill="none" stroke={col} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>;
+  };
+
+  // Range bar
+  const RangeBar=({ranges,value,min,max,col})=>{
+    const pct=v=>Math.max(0,Math.min(100,((v-min)/(max-min))*100));
+    return <div style={{position:"relative",height:6,borderRadius:3,overflow:"hidden",background:"#0a0e16",marginTop:8}}>
+      {ranges.map((r,i)=><div key={i} style={{position:"absolute",left:`${pct(r.lo)}%`,width:`${pct(r.hi)-pct(r.lo)}%`,height:"100%",background:r.c,opacity:.85}}/>)}
+      <div style={{position:"absolute",left:`${pct(value)}%`,top:-1,width:3,height:8,background:col,borderRadius:2,transform:"translateX(-50%)",boxShadow:`0 0 6px ${col}`}}/>
+    </div>;
+  };
+
+  const metrics=[
+    {id:"vo2",label:"VO₂ MAX",value:"48.2",unit:"mL/kg/min",sc:91,col:gC(91),
+     status:"Excellent",delta:{dir:"↗",val:"1.4",good:true},src:"⌘ 34 Apple Health",
+     spark:[44.1,45.3,44.8,46.2,45.9,47.1,46.8,47.5,47.9,48.0,48.1,48.2],
+     ranges:[{lo:0,hi:27,c:"#ff6b6b"},{lo:27,hi:31.5,c:"#f0c060"},{lo:31.5,hi:38,c:"#7feba1"},{lo:38,hi:44,c:"#00ffa3"},{lo:44,hi:60,c:"#00ffa399"}],
+     min:15,max:55,optLabel:"Optimal: 42–44+ mL/kg/min"},
+    {id:"rhr",label:"RESTING HEART RATE",value:"52",unit:"bpm",sc:88,col:gC(88),
+     status:"Excellent",delta:{dir:"↘",val:"3",good:true},src:"⌘ 526 Apple Health",
+     spark:[58,55,54,56,53,52,54,51,53,52,53,52],
+     ranges:[{lo:0,hi:40,c:"#00ffa3"},{lo:40,hi:60,c:"#00ffa399"},{lo:60,hi:75,c:"#f0c060"},{lo:75,hi:85,c:"#ff6b6b"},{lo:85,hi:100,c:"#cc4444"}],
+     min:40,max:100,optLabel:"Optimal: 40–60 bpm"},
+    {id:"bp",label:"BLOOD PRESSURE",value:"112",unit:"mmHg",sc:93,col:gC(93),secondary:"/ 70",
+     status:"Optimal",delta:{dir:"↘",val:"4",good:true},src:"⌘ 12 Apple Health",
+     spark:[118,116,114,115,113,114,112,113,111,112,113,112],
+     ranges:[{lo:90,hi:120,c:"#00ffa3"},{lo:120,hi:130,c:"#7feba1"},{lo:130,hi:140,c:"#f0c060"},{lo:140,hi:160,c:"#ff6b6b"},{lo:160,hi:180,c:"#cc4444"}],
+     min:90,max:170,optLabel:"Optimal: 90–120 mmHg"},
+    {id:"gl",label:"FASTING GLUCOSE",value:"76",unit:"mg/dL",sc:92,col:gC(92),
+     status:"Optimal",delta:{dir:"↘",val:"6",good:true},src:"⌘ 8 Apple Health",
+     spark:[88,84,82,80,79,78,77,76,78,75,76,76],
+     ranges:[{lo:60,hi:85,c:"#00ffa3"},{lo:85,hi:100,c:"#7feba1"},{lo:100,hi:125,c:"#f0c060"},{lo:125,hi:160,c:"#ff6b6b"},{lo:160,hi:200,c:"#cc4444"}],
+     min:60,max:180,optLabel:"Optimal: 60–85 mg/dL"},
+    {id:"bf",label:"BODY FAT %",value:"14.2",unit:"%",sc:87,col:gC(87),
+     status:"Athletic",delta:{dir:"↘",val:"0.8",good:true},src:"⌘ 454 Apple Health",
+     spark:[16.2,15.8,15.6,15.4,15.1,14.9,14.8,14.6,14.5,14.3,14.2,14.2],
+     ranges:[{lo:2,hi:6,c:"#445566"},{lo:6,hi:13,c:"#00ffa3"},{lo:13,hi:17,c:"#7feba1"},{lo:17,hi:25,c:"#f0c060"},{lo:25,hi:32,c:"#ff6b6b"},{lo:32,hi:45,c:"#cc4444"}],
+     min:4,max:40,optLabel:"Optimal: 6–17% (Male)"},
+  ];
+
+  const bioAge=39.2,chronoAge=47,delta=+(chronoAge-bioAge).toFixed(1),overall=90;
+
+  // GlowRing
+  const GR=({score,size=50})=>{
+    const col=gC(score);
+    const r=(size-8)/2,circ=2*Math.PI*r,dash=(score/100)*circ;
+    return <svg width={size} height={size} style={{transform:"rotate(-90deg)"}}>
+      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="#1a2030" strokeWidth={4}/>
+      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={col} strokeWidth={4}
+        strokeDasharray={`${dash} ${circ-dash}`} strokeLinecap="round"
+        style={{filter:`drop-shadow(0 0 4px ${col}88)`}}/>
+    </svg>;
+  };
+
+  return <div style={{fontFamily:T.fn,background:D,borderRadius:12,overflow:"hidden",fontSize:11}}>
+    {/* Nav */}
+    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 18px",borderBottom:`1px solid ${B}`,background:"rgba(6,10,16,.97)",flexWrap:"wrap",gap:6}}>
+      <div style={{fontFamily:T.dp,fontSize:15,fontWeight:900,color:BR}}><span style={{color:G}}>BIO</span>AGE</div>
+      <div style={{display:"flex",gap:5,alignItems:"center",flexWrap:"wrap"}}>
+        <div style={{display:"flex",background:"#0a0e16",border:`1px solid ${B}`,borderRadius:6,overflow:"hidden"}}>
+          <div style={{padding:"4px 9px",fontSize:9,background:"#0e2218",color:G}}>♂ Male</div>
+          <div style={{padding:"4px 9px",fontSize:9,color:DM}}>♀ Female</div>
+        </div>
+        <div style={{fontSize:9,color:DM,background:C,border:`1px solid ${B}`,borderRadius:5,padding:"4px 9px"}}>🌐 General</div>
+        <div style={{fontSize:9,color:G,background:"rgba(0,255,163,.08)",border:"1px solid rgba(0,255,163,.18)",borderRadius:14,padding:"3px 8px"}}>⌘ 1034</div>
+        {["📸 Snapshot","⬆ Import","ℹ About","+ Log"].map(l=><div key={l} style={{fontSize:9,color:DM,padding:"4px 8px",borderRadius:5,background:C,border:`1px solid ${B}`}}>{l}</div>)}
+      </div>
+    </div>
+
+    {/* Hero */}
+    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"20px 20px 14px",borderBottom:`1px solid ${B}`,flexWrap:"wrap",gap:12}}>
+      <div>
+        <div style={{fontSize:9,letterSpacing:".2em",color:DM,textTransform:"uppercase",marginBottom:2}}>Estimated Biological Age</div>
+        <div style={{fontFamily:T.dp,fontSize:52,fontWeight:900,color:G,lineHeight:1,textShadow:"0 0 32px rgba(0,255,163,.3)"}}>{bioAge}</div>
+        <div style={{display:"inline-block",marginTop:7,padding:"3px 10px",borderRadius:16,fontSize:10,background:"rgba(0,255,163,.08)",border:"1px solid rgba(0,255,163,.22)",color:G}}>
+          ↓ {delta} yrs younger than chronological
+        </div>
+        <div style={{marginTop:5,fontSize:9,color:"#1e3040"}}>♂ Male · General Population · Age {chronoAge}</div>
+      </div>
+      <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:8}}>
+        <div style={{fontSize:9,letterSpacing:".14em",color:DM}}>YOUR AGE</div>
+        <div style={{background:"#0d1117",border:`1px solid ${B}`,borderRadius:7,color:BR,fontSize:13,padding:"6px 10px",width:88,textAlign:"center"}}>{chronoAge}</div>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <div style={{position:"relative",width:50,height:50}}>
+            <GR score={overall} size={50}/>
+            <div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:G}}>{overall}</div>
+          </div>
+          <div><div style={{fontSize:8,color:DM}}>OVERALL</div><div style={{fontSize:10,color:G}}>Optimal</div></div>
+        </div>
+      </div>
+    </div>
+
+    {/* Metric cards */}
+    <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,padding:"12px 14px"}}>
+      {metrics.map(m=><div key={m.id} style={{background:C,border:`1px solid ${B}`,borderRadius:11,padding:"14px 15px",position:"relative",overflow:"hidden"}}>
+        <div style={{position:"absolute",top:-36,right:-36,width:88,height:88,borderRadius:"50%",background:m.col,opacity:.04,filter:"blur(20px)",pointerEvents:"none"}}/>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
+          <div>
+            <div style={{fontSize:8,letterSpacing:".15em",textTransform:"uppercase",color:DM,marginBottom:2}}>{m.label}</div>
+            <div style={{display:"flex",alignItems:"baseline",gap:2}}>
+              <span style={{fontFamily:T.dp,fontSize:26,fontWeight:800,color:m.col,lineHeight:1,textShadow:`0 0 12px ${m.col}44`}}>{m.value}</span>
+              <span style={{fontSize:9,color:DM}}>{m.unit}</span>
+              {m.secondary&&<span style={{fontSize:9,color:DM}}>{m.secondary}</span>}
+            </div>
+          </div>
+          <div style={{position:"relative",width:40,height:40}}>
+            <GR score={m.sc} size={40}/>
+            <div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,fontWeight:700,color:m.col}}>{m.sc}</div>
+          </div>
+        </div>
+        <div style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:8,letterSpacing:".06em",color:m.col,marginBottom:4}}>
+          <div style={{width:4,height:4,borderRadius:"50%",background:m.col,boxShadow:`0 0 4px ${m.col}`}}/>
+          {m.status}
+          <span style={{color:m.delta.good?G:"#ff6b6b",marginLeft:3}}>{m.delta.dir} {m.delta.val}</span>
+        </div>
+        {m.src&&<div style={{fontSize:7.5,color:"#006633",marginBottom:4}}>{m.src}</div>}
+        <RangeBar ranges={m.ranges} value={parseFloat(m.value)} min={m.min} max={m.max} col={m.col}/>
+        <div style={{marginTop:5,height:24}}>
+          <Spark pts={m.spark} col={m.col} h={24}/>
+        </div>
+        <div style={{fontSize:7,color:"#1a2530",marginTop:3,letterSpacing:".08em"}}>{m.optLabel}</div>
+      </div>)}
+    </div>
+
+    {/* Bio age trajectory strip */}
+    <div style={{margin:"0 14px 14px",background:C,border:`1px solid ${B}`,borderRadius:11,padding:"12px 15px"}}>
+      <div style={{fontFamily:T.dp,fontSize:11,fontWeight:700,color:BR,marginBottom:2}}>Biological Age Trajectory</div>
+      <div style={{fontSize:8,color:"#223344",marginBottom:8}}>Bio age vs. chronological — last 12 months</div>
+      <div style={{position:"relative",height:44}}>
+        {/* Chrono reference line */}
+        <div style={{position:"absolute",top:"30%",left:0,right:0,borderTop:"1px dashed #1a2535",}}/>
+        <svg width="100%" height="44" viewBox="0 0 400 44" preserveAspectRatio="none">
+          <defs><linearGradient id="tg" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#00ffa3" stopOpacity=".18"/>
+            <stop offset="100%" stopColor="#00ffa3" stopOpacity="0"/>
+          </linearGradient></defs>
+          {/* Bio age line — trending from ~42 down to 39.2 */}
+          <path d="M0,18 L36,17 L73,16 L109,15 L145,14 L182,13.5 L218,13 L254,12.5 L291,12 L327,11.5 L364,11 L400,10"
+            fill="url(#tg)" stroke="#00ffa3" strokeWidth="1.8" strokeLinecap="round"/>
+          {/* Chrono line */}
+          <line x1="0" y1="32" x2="400" y2="32" stroke="#1e3040" strokeWidth="1" strokeDasharray="4,3"/>
+        </svg>
+        <div style={{position:"absolute",right:4,top:6,fontSize:7,color:G,fontFamily:"'DM Mono',monospace"}}>39.2</div>
+        <div style={{position:"absolute",right:4,bottom:4,fontSize:7,color:"#1e3040",fontFamily:"'DM Mono',monospace"}}>Chrono 47</div>
+      </div>
+      <div style={{display:"flex",justifyContent:"space-between",marginTop:4}}>
+        {["Mar '25","May '25","Jul '25","Sep '25","Nov '25","Feb '26"].map(l=><span key={l} style={{fontSize:7,color:"#1e2a3a"}}>{l}</span>)}
+      </div>
+    </div>
+  </div>;
+}
 
 function FAQ(){
   const [open,setOpen]=React.useState(null);
@@ -1334,6 +1518,22 @@ function LandingPage({onEnterApp}){
     <div className="lp-strip">
       {[["VO₂ Max","Cardio Fitness","ACSM","#00ffa3"],["Heart Rate","Resting HR","AHA","#f0c060"],["Blood Pressure","Systolic/Diastolic","AHA 2017","#ff6b6b"],["Glucose","Fasting Blood Sugar","ADA + Attia","#7feba1"],["Body Fat %","Composition","ACE by Sex","#a78bfa"]].map(([v,l,s,c])=>
         <div key={v} className="lp-pill"><div className="lv" style={{color:c}}>{v}</div><div className="ll">{l}</div><div className="ls">{s}</div></div>)}
+    </div>
+
+    {/* Dashboard screenshot */}
+    <div className="lp-mockup-wrap" style={{padding:"0 0 88px"}}>
+      <div className="lp-mockup-inner" style={{maxWidth:1080,margin:"0 auto",padding:"0 24px"}}>
+        <div className="lp-mockup-label" style={{marginBottom:16,marginTop:72}}>
+          <span>Live dashboard</span> · Sample: Male · 47 yrs · Optimal health
+        </div>
+        <div className="lp-mockup-frame">
+          <DashboardMockup/>
+          <div className="lp-mockup-fade"/>
+        </div>
+        <div style={{textAlign:"center",marginTop:14,fontFamily:"'DM Mono',monospace",fontSize:9,color:"#1e2a3a",letterSpacing:".12em",textTransform:"uppercase"}}>
+          Tap "Open Dashboard" to track your own metrics →
+        </div>
+      </div>
     </div>
 
     {/* How it works */}
@@ -1487,7 +1687,7 @@ export default function BioAgeTracker(){
     ne.forEach(x=>{const i=merged.findIndex(e=>e.metricId===x.metricId&&e.date===x.date);if(i>=0)merged[i]=x;else merged.push(x);});
     persist(merged);
     if(dSex){setSex(dSex);window.storage?.set("ba6_sex",dSex);}
-    if(dDOB){const y=new Date().getFullYear()-new Date(dDOB).getFullYear();setAge(y);window.storage?.set("ba6_age",String(y));}
+    if(dDOB){const _t=new Date(),_d=new Date(dDOB);const _had=_t.getMonth()>_d.getMonth()||((_t.getMonth()===_d.getMonth())&&_t.getDate()>=_d.getDate());const y=_t.getFullYear()-_d.getFullYear()-(_had?0:1);setAge(y);window.storage?.set("ba6_age",String(y));}
   };
 
   const getLatest=id=>entries.filter(e=>e.metricId===id).sort((a,b)=>b.date.localeCompare(a.date))[0]||null;
@@ -1749,5 +1949,6 @@ export default function BioAgeTracker(){
     <div style={{padding:"0 26px 28px",fontSize:9,color:"#1a2530",lineHeight:2}}>
       VO₂ Max: ACSM by sex/age · Body Fat: ACE by sex · RHR: AHA · BP: AHA 2017 · Glucose: ADA + Attia · Ethnicity: WHO 2004, ADA, Lancet 2020 · Not medical advice
     </div>
+    <Analytics />
   </div>;
 }
